@@ -2,6 +2,8 @@
 
 **A Jev-style `/v1/systemone` API in front of any OpenAI-compatible LLM server.**
 
+[日本語版 README はこちら](README.ja.md)
+
 [TypeSafe AI's Jev](https://typesafe.ai) is a "System One" model: you send it a
 piece of *state* plus typed *questions*, and it returns typed answers with
 probabilities — no generated prose. Jev itself is a closed, hosted model.
