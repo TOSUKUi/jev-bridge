@@ -85,7 +85,9 @@ class QuestionScorer:
             answer["confidence"] = round(
                 confidence_from(probs, method=self.confidence_method), 4
             )
-            answer["probabilities"] = probabilities_map(labels, probs)
+            # Jev keys choice probabilities by the criteria option names
+            # (e.g. {"billing": 0.94, "shipping": 0.06}), not by prompt labels.
+            answer["probabilities"] = probabilities_map(q.levels(), probs)
         elif q.type == "noul":
             # labels order is [true, false]; the answer is p(true)
             answer["noul"] = round(probs[0], 4)

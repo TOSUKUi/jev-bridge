@@ -78,7 +78,7 @@ Response:
       "type": "choice",
       "choice": "billing",
       "confidence": 0.9813,
-      "probabilities": {"A": 0.9934, "B": 0.0033, "C": 0.0033}
+      "probabilities": {"billing": 0.9934, "shipping": 0.0033, "returns": 0.0033}
     },
     "is_urgent": {"type": "noul", "noul": 0.9987},
     "severity": {
@@ -93,9 +93,9 @@ Response:
 }
 ```
 
-> `probabilities` keys are the option **labels** used in the prompt. For
-> `choice`, the answer's `choice` field is the original criteria key (e.g.
-> `billing`), identical to Jev's behavior.
+> `choice` probabilities are keyed by the option names from `criteria`, and
+> `score` probabilities by level index (`"0"`, `"1"`, …), matching Jev.
+> `noul` has no separate confidence field — its probability is the answer.
 
 ## Wire format
 

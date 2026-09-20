@@ -79,11 +79,10 @@ def test_systemone_end_to_end():
     assert dept["type"] == "choice"
     assert dept["choice"] == "billing"
     assert abs(sum(dept["probabilities"].values()) - 1.0) < 1e-3
-    # probabilities are keyed by the prompt labels (A/B/C); the argmax label
-    # must map back to the criteria key reported in "choice"
-    criteria_keys = list(BODY["questions"]["department"]["criteria"].keys())
-    best_label = max(dept["probabilities"], key=dept["probabilities"].get)
-    assert criteria_keys[ord(best_label) - ord("A")] == dept["choice"]
+    # Jev keys choice probabilities by option name, and the argmax option is
+    # what the answer reports as "choice".
+    assert set(dept["probabilities"]) == {"billing", "shipping", "returns"}
+    assert dept["choice"] == max(dept["probabilities"], key=dept["probabilities"].get)
 
     assert data["answers"]["is_urgent"]["noul"] > 0.9
 
