@@ -1,0 +1,25 @@
+# Run jev-bridge in front of any OpenAI-compatible LLM server.
+#
+#   docker compose up
+#   curl http://127.0.0.1:8900/health
+#
+# Point JEVB_BACKEND_BASE_URL at your inference server (SGLang, vLLM,
+# llama.cpp, LMDeploy, ...). For a server on the host, use
+# host.docker.internal and add the extra_hosts entry below.
+services:
+  jev-bridge:
+    image: ghcr.io/yourname/jev-bridge:latest
+    # or build from this repo:
+    # build: ..
+    environment:
+      JEVB_BACKEND_BASE_URL: http://host.docker.internal:30010/v1
+      JEVB_BACKEND_MODEL: qwen3.8-flash-next
+      JEVB_MAX_CONCURRENCY: "8"
+      # Qwen3.x: empty think-block via the chat template (backend-native way)
+      # instead of the assistant prefill:
+      # JEVB_BACKEND_EXTRA_BODY: '{"chat_template_kwargs":{"enable_thinking":false}}'
+      # JEVB_PREFILL_ASSISTANT: "0"
+    ports:
+      - "127.0.0.1:8900:8900"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

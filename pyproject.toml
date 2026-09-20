@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jev-bridge"
+version = "0.1.0"
+description = "Jev-style /v1/systemone API in front of any OpenAI-compatible LLM server (one-token logprob scoring, no fine-tuning)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "jev-bridge contributors" }]
+keywords = ["jev", "systemone", "logprobs", "classification", "sglang", "vllm", "openai"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+jev-bridge = "jev_bridge.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jev_bridge"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
