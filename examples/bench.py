@@ -18,7 +18,8 @@ import time
 import httpx
 
 ONE = {
-    "questions": {"is_urgent": {"type": "noul", "instructions": "Does this message express urgency?"}}
+    "state": "My card was charged twice for order A-104 and I need this fixed today.",
+    "questions": {"is_urgent": {"type": "noul", "instructions": "Does this message express urgency?"}},
 }
 
 THREE = {

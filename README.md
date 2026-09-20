@@ -194,9 +194,12 @@ Measured end to end (HTTP server, warm) on a single RTX PRO 6000 with
 **Qwen3.8-Flash-Next** served by SGLang (OpenAI-compatible endpoint):
 
 ```
-1 question  (noul)              median ~111 ms
-3 questions (choice+noul+score) median ~228 ms   <- all three in parallel
+1 question  (noul)              median ~83–111 ms
+3 questions (choice+noul+score) median ~161–228 ms   <- all three in parallel
 ```
+
+(Range across warm runs / cache states; all three questions of a request run
+concurrently, so three questions cost far less than 3x one question.)
 
 Reproduce with `python examples/bench.py http://127.0.0.1:8900`. For
 comparison, TypeSafe reports 70–500 ms for hosted Jev and a community
