@@ -1,32 +1,35 @@
 """Prompt construction.
 
-Design: the STATE goes into a shared system message; each question becomes a
-single user turn ("state-system, question-user"). All question calls share the
-exact same system prefix, so backends with prefix caching (SGLang radix
-cache, vLLM APC) prefill the state once and then only process the tiny
-per-question suffix.
+Message layout (one user turn, images first):
 
-The final assistant message is an empty think-block prefill
-(``<think></think>``) so thinking-mode models (e.g. Qwen3.x) answer with the
-label token immediately instead of emitting ``<think>`` first. Disable with
-``JEVB_PREFILL_ASSISTANT=0`` for models where that prefix is wrong.
+    system:    static instruction, no state
+    user:      [image parts...] + "STATE:\n{state}\n\n{question block}"
+    assistant: "<think></think>" prefill (optional)
+
+Why one user message instead of ``system(state) + user(question)``:
+OpenAI-compatible templates reject images in system messages, and some
+templates (Llama-style) require strict user/assistant alternation. Putting
+everything in a single user turn keeps both happy. Prefix caching is
+unaffected: the differing part (the question) is at the *end* of the token
+stream, so SGLang's radix cache / vLLM's APC still reuse the
+[system + images + state] prefill across every question of a request.
+
+The assistant prefill suppresses thinking-model preamble (Qwen3.x emits
+``<think>`` otherwise). Disable with ``JEVB_PREFILL_ASSISTANT=0``.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .labels import LETTERS
 from .schemas import JevBridgeError, Question
 
-STATE_SYSTEM_TEMPLATE = """\
+SYSTEM_INSTRUCTION = """\
 You are a decision engine. You never explain, never apologize, and never \
 write sentences. You read the STATE and answer the user's question by \
-outputting EXACTLY ONE answer label and nothing else.
-
-STATE:
-{state}"""
+outputting EXACTLY ONE answer label and nothing else."""
 
 
 def serialize_state(state: Any) -> str:
@@ -68,10 +71,31 @@ def question_user_message(q: Question) -> str:
     return "\n".join(lines)
 
 
-def build_messages(state_text: str, q: Question, *, prefill_assistant: bool) -> List[Dict[str, str]]:
-    messages = [
-        {"role": "system", "content": STATE_SYSTEM_TEMPLATE.format(state=state_text)},
-        {"role": "user", "content": question_user_message(q)},
+def user_message(
+    state_text: str,
+    question_text: str,
+    image_urls: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    body = f"STATE:\n{state_text}\n\n{question_text}"
+    if not image_urls:
+        return {"role": "user", "content": body}
+    parts: List[Dict[str, Any]] = [
+        {"type": "image_url", "image_url": {"url": url}} for url in image_urls
+    ]
+    parts.append({"type": "text", "text": body})
+    return {"role": "user", "content": parts}
+
+
+def build_messages(
+    state_text: str,
+    q: Question,
+    *,
+    prefill_assistant: bool,
+    image_urls: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": SYSTEM_INSTRUCTION},
+        user_message(state_text, question_user_message(q), image_urls),
     ]
     if prefill_assistant:
         messages.append({"role": "assistant", "content": "<think></think>"})

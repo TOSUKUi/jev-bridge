@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import prompts
 from .backend import OpenAICompatClient
+from .images import normalize_image
 from .labels import LETTERS, labels_for
 from .probability import confidence_from, probabilities_map, restricted_softmax, score_answer
 from .schemas import Question, SystemOneRequest
@@ -69,10 +70,17 @@ class QuestionScorer:
                 lps.append(floor)
         return lps
 
-    async def score(self, state_text: str, q: Question) -> Tuple[Dict, Dict[str, Any]]:
+    async def score(
+        self, state_text: str, q: Question, image_urls: Optional[List[str]] = None
+    ) -> Tuple[Dict, Dict[str, Any]]:
         labels = self._labels(q)
         q.option_labels = labels
-        messages = prompts.build_messages(state_text, q, prefill_assistant=self.prefill_assistant)
+        messages = prompts.build_messages(
+            state_text,
+            q,
+            prefill_assistant=self.prefill_assistant,
+            image_urls=image_urls or None,
+        )
         _text, top, usage = await self.client.first_token_logprobs(
             messages, self._request_top_k(len(labels))
         )
@@ -106,6 +114,7 @@ async def score_all(
     request: SystemOneRequest,
     *,
     max_concurrency: int = 8,
+    allow_local_images: bool = False,
 ) -> Tuple[Dict[str, Dict], Dict[str, int]]:
     """Score all questions concurrently.
 
@@ -114,10 +123,14 @@ async def score_all(
     """
     state_text = prompts.serialize_state(request.state)
     sem = asyncio.Semaphore(max_concurrency)
+    image_urls = [
+        normalize_image(ref, allow_local=allow_local_images)
+        for ref in request.images
+    ]
 
     async def run(key: str, q: Question) -> Tuple[str, Dict, Dict[str, Any]]:
         async with sem:
-            answer, usage = await scorer.score(state_text, q)
+            answer, usage = await scorer.score(state_text, q, image_urls)
         return key, answer, usage
 
     results = await asyncio.gather(*(run(k, q) for k, q in request.questions.items()))

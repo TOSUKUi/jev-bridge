@@ -123,7 +123,10 @@ async def systemone(request: Request) -> JSONResponse:
     parsed = SystemOneRequest.parse(body)
     scorer: QuestionScorer = request.app.state.bridge["scorer"]
     answers, usage = await score_all(
-        scorer, parsed, max_concurrency=int(os.environ.get("JEVB_MAX_CONCURRENCY", "8"))
+        scorer,
+        parsed,
+        max_concurrency=int(os.environ.get("JEVB_MAX_CONCURRENCY", "8")),
+        allow_local_images=_bool_env("JEVB_ALLOW_LOCAL_IMAGES", False),
     )
     usage["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
     return JSONResponse(

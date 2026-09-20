@@ -106,6 +106,7 @@ curl -s http://127.0.0.1:8900/v1/systemone -H 'Content-Type: application/json' -
 |---|---|---|
 | `model` | string, 任意 | レスポンスにエコーされるだけ。バックエンドのモデルは `JEVB_BACKEND_MODEL` で指定 |
 | `state` | string または JSON | 判定対象。文字列でもオブジェクトでもよい |
+| `images` | array, 任意 | 画像入力（拡張）。data URI / http(s) URL / 生base64 / ローカルパス（要許可） |
 | `questions` | object | 質問名 → 質問 のマップ |
 
 質問タイプ（Jev のプリミティブに対応）:
@@ -158,6 +159,44 @@ thinking モデルは最初のトークンに `<think>` を出しますが、こ
 
 `JEVB_DISABLE_THINKING=0` や `JEVB_PREFILL_ASSISTANT=0` で個別に切れます。
 テンプレート引数を直接渡したい場合は `JEVB_BACKEND_EXTRA_BODY` を使います（組み込みの既定より優先）。
+
+## 画像入力（拡張）
+
+Jev 本体はテキスト専用のため、`images` は jev-bridge の拡張です。`state` の隣に
+トップレベル `images` 配列を追加します。画像と state テキストは同じ user ターンに置き
+（テンプレートは system メッセージ内の画像を拒否するため）、質問は末尾に残すので
+プレフィックスキャッシュは画像の prefill を再利用します:
+
+```json
+{
+  "state": "What is shown in this photo?",
+  "images": ["data:image/png;base64,iVBOR…"],
+  "questions": {
+    "scene":      {"type": "choice", "instructions": "Where is this?", "criteria": {"indoor": "…", "outdoor": "…"}},
+    "has_people": {"type": "noul", "instructions": "Are people visible?"}
+  }
+}
+```
+
+受け付ける画像参照:
+
+| 形式 | 例 |
+|---|---|
+| data URI | `data:image/png;base64,iVBOR…` |
+| URL | `https://example.com/photo.jpg`（バックエンドが取得） |
+| 生 base64 | `iVBORw0KGgo…`（マジックバイトから形式を判定） |
+| ローカルパス | `/path/to.png` — **`JEVB_ALLOW_LOCAL_IMAGES=1` のときのみ** |
+
+注意点:
+
+* 形式はペイロードから再判定されます。data URI の宣言 MIME が実体と食い違う場合は
+  実体を優先し、実体が既知の画像形式でなければ 400 で拒否します。
+* 対応形式: PNG / JPEG / GIF / WEBP / BMP。それ以外は呼び出し側で変換してください。
+  サイズ上限は `JEVB_MAX_IMAGE_BYTES`（既定 20 MiB）。
+* バックエンドモデルが vision 対応である必要があります。テキスト専用モデルでは
+  バックエンドが拒否し、ブリッジは 502 とバックエンドのメッセージを返します。
+* 画像トークンは共有プレフィックスの一部なので、1枚の画像に対する N 質問でも
+  画像の prefill は1回です。
 
 ## 性能
 

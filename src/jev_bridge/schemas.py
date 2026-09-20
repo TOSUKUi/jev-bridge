@@ -78,6 +78,7 @@ class SystemOneRequest:
     model: Optional[str]
     state: Any
     questions: Dict[str, Question]
+    images: List[str]
     raw: Dict[str, Any]
 
     @classmethod
@@ -100,6 +101,20 @@ class SystemOneRequest:
             q.validate()
             questions[str(key)] = q
         state = body.get("state")
-        if state is None:
-            raise JevBridgeError("'state' is required")
-        return cls(model=body.get("model"), state=state, questions=questions, raw=body)
+        images_raw = body.get("images")
+        if state is None and not images_raw:
+            raise JevBridgeError("'state' is required (or supply 'images')")
+        images: List[str] = []
+        if images_raw is not None:
+            if isinstance(images_raw, str):
+                images_raw = [images_raw]
+            if not isinstance(images_raw, list):
+                raise JevBridgeError("'images' must be a string or an array of image references")
+            images = [str(entry) for entry in images_raw]
+        return cls(
+            model=body.get("model"),
+            state=state if state is not None else "",
+            questions=questions,
+            images=images,
+            raw=body,
+        )

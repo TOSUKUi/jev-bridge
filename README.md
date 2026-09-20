@@ -132,6 +132,8 @@ Question types (matching Jev's primitives):
 | `JEVB_DISABLE_THINKING` | `1` | send `chat_template_kwargs: {enable_thinking: false, preserve_thinking: false}`; auto-retries without it if the backend rejects it |
 | `JEVB_BACKEND_EXTRA_BODY` | — | JSON merged into each chat-completions body, e.g. `{"chat_template_kwargs":{"enable_thinking":false}}` |
 | `JEVB_MODEL_NAME` | `jev-bridge-1` | reported model name when the request has no `model` |
+| `JEVB_ALLOW_LOCAL_IMAGES` | `0` | allow local file paths in `images` (off = data URI / URL / base64 only) |
+| `JEVB_MAX_IMAGE_BYTES` | `20971520` (20 MiB) | per-image size cap after decode |
 | `JEVB_HOST` / `JEVB_PORT` | `0.0.0.0` / `8900` | listen address for `jev-bridge serve` |
 
 ### Confidence
@@ -189,6 +191,44 @@ jev-bridge serve [--host H] [--port P]        # run the proxy
 jev-bridge probe http://host:8000/v1          # score 3 sample questions directly against a backend
 jev-bridge probe http://localhost:8900/v1/systemone   # end-to-end check of a running bridge
 ```
+
+## Image input (extension)
+
+Jev itself is text-only, so `images` is a jev-bridge extension. Add a
+top-level `images` array next to `state`; images and state text share the
+same user turn (templates reject images in system messages), and the question
+stays at the end so prefix caching still reuses the image prefill:
+
+```json
+{
+  "state": "What is shown in this photo?",
+  "images": ["data:image/png;base64,iVBOR…"],
+  "questions": {
+    "scene":     {"type": "choice", "instructions": "Where is this?", "criteria": {"indoor": "…", "outdoor": "…"}},
+    "has_people": {"type": "noul", "instructions": "Are people visible?"}
+  }
+}
+```
+
+Accepted image references:
+
+| form | example |
+|---|---|
+| data URI | `data:image/png;base64,iVBOR…` |
+| URL | `https://example.com/photo.jpg` (backend fetches it) |
+| bare base64 | `iVBORw0KGgo…` (format sniffed from magic bytes) |
+| local path | `/path/to.png` — **only with `JEVB_ALLOW_LOCAL_IMAGES=1`** |
+
+Notes:
+
+* The format is re-sniffed from the payload; a mislabeled data URI is corrected,
+  and a data URI whose bytes are not a recognized image is rejected (400).
+* Native formats: PNG, JPEG, GIF, WEBP, BMP. Other formats must be converted
+  by the caller; per-image decode cap `JEVB_MAX_IMAGE_BYTES` (default 20 MiB).
+* The backend model must be vision-capable — on a text-only model the backend
+  rejects the request and the bridge returns 502 with the backend's message.
+* Image tokens are part of the shared prefix, so N questions about one image
+  still prefill the image once.
 
 ## Performance
 

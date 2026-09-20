@@ -13,7 +13,7 @@ from jev_bridge.probability import (
     restricted_softmax,
     score_answer,
 )
-from jev_bridge.prompts import build_messages, question_user_message, serialize_state
+from jev_bridge.prompts import build_messages, question_user_message, serialize_state, user_message
 from jev_bridge.schemas import JevBridgeError, Question, SystemOneRequest
 
 
@@ -130,11 +130,35 @@ def test_choice_prompt_uses_number_for_digit_labels():
 
 def test_build_messages_prefill_assistant():
     q = Question(key="q", type="noul", instructions="is it?")
-    msgs = build_messages("STATE", q, prefill_assistant=True)
+    msgs = build_messages("the-state", q, prefill_assistant=True)
     assert msgs[-1] == {"role": "assistant", "content": "<think></think>"}
-    assert "STATE" in msgs[0]["content"]
-    msgs2 = build_messages("STATE", q, prefill_assistant=False)
+    assert "the-state" in msgs[1]["content"]
+    assert "the-state" not in msgs[0]["content"]  # system prompt is static (prefix-friendly)
+    msgs2 = build_messages("the-state", q, prefill_assistant=False)
     assert msgs2[-1]["role"] == "user"
+
+
+def test_user_message_with_images():
+    msg = user_message("the state", "the question", ["data:image/png;base64,AAAA"])
+    assert msg["role"] == "user"
+    assert isinstance(msg["content"], list)
+    assert msg["content"][0]["type"] == "image_url"
+    assert msg["content"][-1]["type"] == "text"
+    assert "the state" in msg["content"][-1]["text"]
+    assert "the question" in msg["content"][-1]["text"]
+
+
+def test_user_message_without_images_is_plain_string():
+    msg = user_message("s", "q", None)
+    assert isinstance(msg["content"], str)
+
+
+def test_build_messages_attaches_images_to_user_turn():
+    q = Question(key="q", type="noul", instructions="is it?")
+    msgs = build_messages("STATE", q, prefill_assistant=False, image_urls=["http://x/i.png"])
+    assert msgs[0]["role"] == "system"
+    assert msgs[1]["role"] == "user"
+    assert msgs[1]["content"][0]["image_url"]["url"] == "http://x/i.png"
 
 
 def test_noul_prompt_mentions_true_false():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any, Dict, List, Tuple
 
 from fastapi.testclient import TestClient
@@ -103,7 +104,8 @@ def test_shares_prefix_state_and_prefills_think_block():
     with client:
         client.post("/v1/systemone", json=BODY)
     first = fake.calls[0]
-    assert "A-104" in first[0]["content"]  # state in system message
+    assert first[0]["role"] == "system"
+    assert "A-104" in first[1]["content"]  # state in the user turn
     assert first[-1]["role"] == "assistant"
     assert first[-1]["content"] == "<think></think>"
 
@@ -147,6 +149,63 @@ def test_backend_error_maps_to_502(monkeypatch):
         )
     assert resp.status_code == 502
     assert resp.json()["error"]["type"] == "backend_error"
+
+
+def test_systemone_with_images_attaches_image_parts():
+    png_b64 = base64.b64encode(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+    ).decode()
+    body = {
+        "state": "what is this?",
+        "images": ["data:image/png;base64," + png_b64],
+        "questions": {"q": {"type": "noul", "instructions": "Is it red?"}},
+    }
+    client, fake = _client_with_fake_backend()
+    with client:
+        resp = client.post("/v1/systemone", json=body)
+    assert resp.status_code == 200, resp.text
+    user_msg = fake.calls[0][1]
+    assert isinstance(user_msg["content"], list)
+    assert user_msg["content"][0]["type"] == "image_url"
+    assert user_msg["content"][0]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert "what is this?" in user_msg["content"][-1]["text"]
+
+
+def test_systemone_rejects_local_image_by_default(tmp_path):
+    png = tmp_path / "img.png"
+    png.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+    )
+    client, _ = _client_with_fake_backend()
+    with client:
+        resp = client.post(
+            "/v1/systemone",
+            json={
+                "state": "s",
+                "images": [str(png)],
+                "questions": {"q": {"type": "noul", "instructions": "?"}},
+            },
+        )
+    assert resp.status_code == 400
+    assert "JEVB_ALLOW_LOCAL_IMAGES" in resp.json()["error"]["message"]
+
+
+def test_systemone_rejects_bad_image_payload():
+    client, _ = _client_with_fake_backend()
+    with client:
+        resp = client.post(
+            "/v1/systemone",
+            json={
+                "state": "s",
+                "images": ["data:image/png;base64,aGVsbG8gd29ybGQ="],  # not an image
+                "questions": {"q": {"type": "noul", "instructions": "?"}},
+            },
+        )
+    assert resp.status_code == 400
 
 
 def test_health():
