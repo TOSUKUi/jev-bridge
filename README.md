@@ -137,9 +137,6 @@ Question types (matching Jev's primitives):
 | `JEVB_PREFILL_ASSISTANT` | `1` | append `<think></think>` to suppress thinking-model preamble |
 | `JEVB_DISABLE_THINKING` | `1` | send `chat_template_kwargs: {enable_thinking: false, preserve_thinking: false}`; auto-retries without it if the backend rejects it |
 | `JEVB_BACKEND_EXTRA_BODY` | — | JSON merged into each chat-completions body, e.g. `{"chat_template_kwargs":{"enable_thinking":false}}`. Naming `max_completion_tokens` here also selects the field that carries the token budget |
-| `JEVB_PRIME_PREFIX` | `0` | send the first question alone so the shared prefix gets cached before the rest fan out (see [Prompt caching](#prompt-caching)) |
-| `JEVB_PRIME_MIN_STATE_CHARS` | `1200` | only prime when the serialized state is at least this long |
-| `JEVB_PRIME_TTL` | `300` | seconds to remember an already-primed state |
 | `JEVB_MODEL_NAME` | `jev-bridge-1` | reported model name when the request has no `model` |
 | `JEVB_ALLOW_LOCAL_IMAGES` | `0` | allow local file paths in `images` (off = data URI / URL / base64 only) |
 | `JEVB_MAX_IMAGE_BYTES` | `20971520` (20 MiB) | per-image size cap after decode |
@@ -186,43 +183,43 @@ Measured on the Qwen3.8-Flash-Next endpoint described in
 So a cached prefix is close to free (~+30 ms for 2k tokens) while a cold prefill
 costs roughly +40 ms per extra 1k tokens. Concurrency is what makes the warm path
 worth having: four questions over a **warm** prefix took **215 ms concurrent** vs
-**468 ms sequential**, so keep the fan-out once the state is warm (and note the
-warm hit is served from a brand-new connection pool too — 225 ms — it is not
-pinned to a connection). The cold case is the one to know about: the same four
-questions over the *same cold* 2.7k-token prefix took **665 ms sequential** and
-**880 ms concurrent**. Requests are admitted together, so none of them can reuse
-a prefix that is only committed when the first prefill finishes — every request
-in a cold burst prefills.
+**468 ms sequential**, so keep the fan-out once the state is warm (and the warm
+hit is served from a brand-new connection pool too — 225 ms — so it is not pinned
+to a connection). The cold case is the one to know about: the same four questions
+over the *same cold* 2.7k-token prefix took **665 ms sequential** (per request
+114 / 117 / 119 / 287 — one prefill, three hits) and **880 ms concurrent**. That
+concurrent figure is consistent with the burst being admitted before any prefill
+is committable, i.e. several prefills of the same prefix. Note the epistemic
+status: this is inferred from wall-clock. The server was not started with
+`--enable-cache-report`, so `usage` carries no `cached_tokens` and no measurement
+here observes the cache directly.
 
-Two levers, both opt-in:
+The one lever is `JEVB_MAX_CONCURRENCY=1` — every question sequential, so each one
+hits the prefix the previous one warmed. Good for long cold states, bad for warm
+throughput (468 ms vs 215 ms above).
 
-* `JEVB_MAX_CONCURRENCY=1` — blunt: every question sequential, so each one hits
-  the prefix the previous one warmed. Good for long-state batch jobs, bad for
-  warm throughput.
-* `JEVB_PRIME_PREFIX=1` — surgical: for states of at least
-  `JEVB_PRIME_MIN_STATE_CHARS` characters, the first question goes out alone and
-  the rest fan out. Tracked per state for `JEVB_PRIME_TTL` seconds, so a warm
-  state is never primed twice, and `usage.prefix_primed` reports when it happens.
+A first-question-then-fan-out primer was implemented, measured, and **removed**. On
+a synthetic prompt (2.7k-token state, one-line questions) it won — 501 ms including
+the primer vs 841 ms unprimed — but on the prompts this bridge actually sends it
+lost at every size tested: +79 ms at 4 questions, +92 ms at 6, and +92 ms replaying
+the captured bodies (699 → 791 ms). The primer is one of the N calls doing the same
+prefill, so it saves at most (N−1)/N of that work and costs a full sequential round
+trip up front; with the bridge's question blocks being a few hundred tokens rather
+than one line, that trade is negative. Fan-out is unconditional.
 
-Honest verdict: on this route priming **does not pay**. Cold requests took
-1163 ms all-parallel vs 1255 ms primed at 6 questions, and 1068 vs 1147 ms at 4.
-Replaying the exact bodies the bridge sends (captured against a stub backend —
-9052 of 9350 characters are byte-identical across the four questions, so the
-layout does share a prefix as intended) says the same: 699 ms unprimed vs 791 ms
-primed. It is arithmetic, not plumbing: the primer is one of the N calls doing
-the same prefill, so it saves at most (N−1)/N of that work while costing a full
-sequential round trip up front. It pays only when the shared prefix dominates the
-prompt (long state, one-line questions) and you fire the primer *ahead of* the
-request rather than inside it.
-
-If you do warm ahead, the cheap call is `max_tokens: 0` — SGLang runs it as
-prefill-only (`completion_tokens: 0`), llama.cpp documents the same as
-`n_predict: 0`. Measured here: 234–448 ms cold for a 4.1k-token prefix, 117 ms
-once warm, and a following 4-question burst drops from 841 ms to 217 ms. Warm it
-when the spec changes or on idle, not inside the request. Two traps: it must be
-spelled `max_tokens` (see the SGLang note below), and `cached_tokens` is invisible
-in `usage` unless the server was started with `--enable-cache-report` — a missing
-field is not a cache miss.
+If you want to warm a prefix yourself, the cheap call is `max_tokens: 0` — SGLang
+runs it prefill-only (`completion_tokens: 0`, no decode step scheduled), llama.cpp
+documents the same as `n_predict: 0`. The cost of such a call here was 234–448 ms
+cold for a 4.1k-token prefix and 117 ms once warm. Whether it buys you anything
+depends on what follows it: on the 2.7k-token single-line-question prompt the
+following 4-question burst went 841 → 217 ms, while on the two-tier shape (4.1k
+judgment JSON + a ~500-token varying context) the burst went 849 → 490 ms but the
+primer's own 448 ms made the combined 938 ms *worse* than not warming at all.
+Warm ahead of the request, when a spec changes or on idle, and treat it as a GPU
+expense rather than a free one — it competes with live traffic. Two traps: it must
+be spelled `max_tokens` (see the SGLang note below), and `cached_tokens` stays
+invisible in `usage` unless the server was started with `--enable-cache-report` —
+a missing field is not a cache miss.
 
 The match is a plain forward match on the **rendered token sequence from token 0**
 — not per message. Reuse length is the longest common prefix with something
@@ -237,13 +234,16 @@ has run. Consequences, measured on this endpoint with a ~1.9k-token seed:
 | same prefix, +910 tokens appended | 152 | 2851 |
 | same prefix, +1860 tokens appended | 216 | 3801 |
 | same prefix, only the question changed | 128–131 | 1946 |
-| one nonce inserted at the very front | 214–219 | 1945 |
+| one nonce inserted at the front of the state | 214–219 | 1945 |
 
-So appending is nearly free (you pay the new tail) while one changed byte at the
-front throws the whole prefix away. Watch for nonces, timestamps, turn counters
-and reordered JSON keys — and note that eviction takes the deepest tail first
-(SGLang evicts radix leaves, vLLM frees in reverse order), so the long context is
-what you lose when memory gets tight, not the stable head.
+Appending is nearly free (you pay the new tail); moving the divergence point
+costs everything after it. The nonce case re-prefilled the whole prompt because
+the divergence sat at the start of the user turn and the shared system block is
+only a few dozen tokens — a change further down would have kept everything above
+it. Watch for nonces, timestamps, turn counters and reordered JSON keys. Eviction
+is documented to drop the deepest tail first (SGLang evicts radix leaves, vLLM
+frees in reverse order), which is why the long context is what you tend to lose
+under memory pressure; we did not measure retention here.
 
 If the stable part of your prompt is the **question spec** and the state is what
 changes (a game loop, say), pass one string as `state` with the spec first:
@@ -253,6 +253,16 @@ reused across every request while only the context tail re-prefills — measured
 a 4.1k-token spec: first request 519 ms, same spec with a fresh context 173 ms,
 and a `max_tokens: 0` primer on the spec alone takes a 4-question concurrent burst
 from 849 ms to 490 ms.
+
+Treat that as a **prompt change, not a config flag**: it needs its own scoring
+regression before you ship it. The spec lands inside the untrusted `STATE` region
+(the only separator is a newline, and nothing enforces precedence between your
+instructions and the payload); a spec duplicated into `state` gives you two
+sources of truth that can disagree while the wire format still looks Jev-valid;
+images are rendered *before* the state, so the claim is void the moment you attach
+one; and a spec long enough to disturb the answer still returns HTTP 200 with tidy
+probabilities, because labels absent from the top-K get a floor and are
+normalised. Measure accuracy on labelled cases before and after, not just latency.
 
 What the bridge does **not** send: `prompt_cache_key`, a session id, or any
 custom header (there is no header configuration; a constant body field can be

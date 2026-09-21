@@ -139,9 +139,6 @@ curl -s http://127.0.0.1:8900/v1/systemone -H 'Content-Type: application/json' -
 | `JEVB_PREFILL_ASSISTANT` | `1` | `<think></think>` プレフィルを assistant メッセージに付与 |
 | `JEVB_DISABLE_THINKING` | `1` | `chat_template_kwargs: {enable_thinking: false, preserve_thinking: false}` を送る。バックエンドに拒否されたら自動で外して再試行 |
 | `JEVB_BACKEND_EXTRA_BODY` | — | 毎回の chat-completions ボディにマージする JSON。例 `{"chat_template_kwargs":{"enable_thinking":false}}`。ここに `max_completion_tokens` を指定すると、トークン予算を入れるフィールド名もこれに切り替わる |
-| `JEVB_PRIME_PREFIX` | `0` | 1問目だけ単独で送信し、共有プレフィックスをキャッシュしてから残りを出線（[プロンプトキャッシュ](#プロンプトキャッシュ) 参照） |
-| `JEVB_PRIME_MIN_STATE_CHARS` | `1200` | シリアライズ後の state がこの文字数以上のときだけ prime する |
-| `JEVB_PRIME_TTL` | `300` | prime 済み state を憶えておく秒数 |
 | `JEVB_MODEL_NAME` | `jev-bridge-1` | リクエストに `model` がない場合に報告するモデル名 |
 | `JEVB_HOST` / `JEVB_PORT` | `0.0.0.0` / `8900` | `jev-bridge serve` の待ち受けアドレス |
 
@@ -186,31 +183,33 @@ seed はなく、httpx は固定のキー順で JSON 化するので、同じ入
 コネクションプールで投げても 225 ms なので、キャッシュはコネクションに縛られません。
 つまり state が温まっている限り fan-out のままで正解です。
 気をつけるのは cold のほう：**同じ cold** の state に4問を投げると
-**直列 665 ms / 並列 880 ms**。リクエストは同時に受付されるので、1問目の prefill が
-完了しないと再利用は始まりません＝cold の burst では全リクエストが prefill を払います。
+**直列 665 ms / 並列 880 ms**でした（直列の内訳は 114 / 117 / 119 / 287 ms ＝
+prefill 1回とヒット3回）。並列の 880 ms は、受付時点で誰もコミット済み prefix を
+持てずに複数本 prefill した説明と整合します。ただしこれは wall-clock からの推定で、
+サーバーは `--enable-cache-report` 無しで起動していたので `usage` に `cached_tokens` は
+出ず、キャッシュを直接見た測定はありません。
 
-どちらもオプトインのレバー:
+レバーは `JEVB_MAX_CONCURRENCY=1` の1つだけ。全質問が直列になり、前の問が温めた
+prefix を次の問が当たります。長い cold state 向きで、温まった側の処理量は落ちます
+（上の 468 ms vs 215 ms）。
 
-* `JEVB_MAX_CONCURRENCY=1` — 荒業。全質問が直列になり、前の問が温めた prefix を
-  次の問が当たります。長い state のバッチ処理向きで、温まった状態の処理量は落ちます。
-* `JEVB_PRIME_PREFIX=1` — ピンポイント。`JEVB_PRIME_MIN_STATE_CHARS` 以上の state の
-  ときだけ1問目を単独送信し、残りを出線。state は `JEVB_PRIME_TTL` 秒憶えるので
-  温まった state を二重に prime せず、発動時は `usage.prefix_primed` に出ます。
+1問目を単独送信してから残りを流す primer は、一度実装して**削除しました**。
+合成プロンプト（state 2.7k・質問1行）では勝っています（primer 込み 501 ms vs
+無primer 841 ms）。しかしこのブリッジが実際に送るプロンプトでは全サイズで負けた：
+4問で +79 ms、6問で +92 ms、捕捉ボディの再生でも +92 ms（699 → 791 ms）。
+primer とは N本のうち1本を前倒しでやるだけなので節約たて (N−1)/N 個分の prefill、
+そのために1往復まるごと先行して払う。ブリッジの質問ブロックは1行でなく数百トークン
+あるので、この取引はマイナスになります。fan-out は無条件です。
 
-正直な結論: この経路では prime は**ペイしません**。cold リクエストは 6問で
-並列 1163 ms / prime 1255 ms、4問で 1068 ms / 1147 ms。ブリッジが実際に送っている
-ボディをスタブサーバーで捕捉してそのまま再生しても同じで（4問のうち 9052 / 9350
-文字がバイト一致＝並びは意図どおり共有プレフィックスになっている）、無prime 699 ms
-vs primer あり 791 ms。理由はプリミングの実装でなく算術です。primer は N本のうち
-1本が同じ prefill を前倒しでやるだけなので、よくて (N−1)/N 分の prefill 節約、
-そのために先行して1往復まるごと払う。効くのは「共有プレフィックスがプロンプトの
-大半を占める（state は長く質問文は1行）＋ primer をリクエストの外提前に撃つ」場合だけです。
-
-提前ウォームするなら安い撃ち方は `max_tokens: 0`。SGLang は prefill-only で走り
-（`completion_tokens: 0`）、llama.cpp も `n_predict: 0` と文書化されています。実測では
-4.1k-token の prefix で cold 234〜448 ms / 温後 117 ms、この後に4問を流すと 841 ms →
-217 ms。ただしリクエストの中で待つ形だと上の先行1往復そのものなので、spec が変わった時か
-アイドル時に撃ってください。注意が2つ: `max_tokens` と書くこと（下の SGLang 節）、
+自分で温めるなら安い撃ち方は `max_tokens: 0`。SGLang は prefill-only で走ります
+（`completion_tokens: 0`、デコードはスケジューリングされない）、llama.cpp も
+`n_predict: 0` と文書化されています。この呼び出し自体のコストは 4.1k-token の
+prefix で cold 234〜448 ms / 温後 117 ms。得をするかは後に何が続くかで、
+2.7k・質問1行のプロンプトでは続く4問 burst が 841 → 217 ms に下がりましたが、
+2段構えの形（判定JSON 4.1k + 毎回変わる context ~500）では burst が 849 → 490 ms に
+下がっても primer の 448 ms が効いて合計 938 ms と、温めないほうが速かったです。
+温めるならリクエストの外、spec が切り替わった時かアイドル時に。GPU を使う以上タダではなく、
+本番トラフィックと競合します。注意が2つ: `max_tokens` と書くこと（下の SGLang 節）、
 そして `usage.prompt_tokens_details.cached_tokens` はサーバー起動時に
 `--enable-cache-report` を付けていないと出ません（フィールドが無いのはミスではなく未計測）。
 
@@ -227,13 +226,16 @@ vs primer あり 791 ms。理由はプリミングの実装でなく算術です
 | 同じ prefix、+910 tok 追加 | 152 | 2851 |
 | 同じ prefix、+1860 tok 追加 | 216 | 3801 |
 | 同じ prefix、質問文だけ変更 | 128〜131 | 1946 |
-| 先頭に nonce を 1 つ挿入 | 214〜219 | 1945 |
+| state の先頭に nonce を 1 つ | 214〜219 | 1945 |
 
-末尾に積み上がるのはほぼ無料（増えた末尾ぶんだけ）、先頭で 1 バイト変わると全部
-やり直し、です。nonce・タイムスタンプ・ターン数カウンタ・JSON のキー順の変更に
-注意。eviction は最も深い末尾から無くなります（SGLang は radix の leaf、vLLM は
-逆順で free）ので、メモリが詰まったときに失われるのは長いコンテキスト側で、
-安定している先頭側ではありません。
+末尾に積み上がるのはほぼ無料（増えた末尾ぶんだけ払う）。分岐点が前にズレるほど
+後ろ全体をやり直すわけで、上の nonce が全 prefill になったのは分岐点が user ターンの
+先頭で、共有できる system ブロックが数十トークンしかなかったからです。もっと後ろで
+分岐すれば、その上のぶんは残ります。nonce・タイムスタンプ・ターン数カウンタ・
+JSON のキー順の変換が典型です。eviction は最も深い末尾から無くなる、と文書上は
+なっています（SGLang は radix の leaf、vLLM は逆順で free）。つまりメモリが詰まった
+ときに落ちやすいのは長いコンテキスト側で、安定している先頭側ではありません —
+ただし保持時間はここで測っていません。
 
 プロンプトの安定部分が state ではなく**判定JSON（質問spec）**側で、state の方が毎回
 変わる（ゲームループなど）なら、`state` を1本の文字列にして spec を先に置いてください:
@@ -242,6 +244,16 @@ vs primer あり 791 ms。理由はプリミングの実装でなく算術です
 再利用されて末尾のコンテキストだけ再 prefill します。4.1k-token の spec で実測:
 初回 519 ms、spec を使い回してコンテキストだけ変えて 173 ms、spec 単体に
 `max_tokens: 0` の primer を撃つと4問並列の burst が 849 ms → 490 ms。
+
+これは config のスイッチではなく **プロンプト設計の変更**として扱ってください。
+別途採点のリグレッションテストが要ります。spec は信頼できない `STATE` の中に
+入ります（区切りは改行だけで、指示とデータの優先を強制する機構はありません）、
+state に写した spec と実際の questions は二重の正本になるので、ズレると
+モデルは片方を読み、ブリッジはもう片方のラベル対応で返します。画像は state より
+前にレンダリングされるので、画像を1枚でも付ける時点でこの前提は崩れます。
+しかも長い spec が回答形式を崩しても HTTP は 200 で、確率はもっともらしく出ます
+（top-K に現れないラベルは下限を入れて正規化するため）。速度ではなく
+ラベル付き事例での正答率を前後で測ってください。
 
 ブリッジが**送っていないもの**: `prompt_cache_key`、セッション id、カスタム
 ヘッダー（ヘッダー設定は無く、固定値のボディフィールドなら `JEVB_BACKEND_EXTRA_BODY`
