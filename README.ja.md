@@ -229,19 +229,30 @@ Jev 本体はテキスト専用のため、`images` は jev-bridge の拡張で�
 
 ## 性能
 
-単一の RTX PRO 6000 上で **Qwen3.8-Flash-Next** を SGLang で配信し、
-HTTP サーバ経由・ウォーム状態で実測:
+**RTX PRO 6000 1枚** で **Qwen3.8-Flash-Next** を OpenAI 互換エンドポイント経由
+（vLLM/SGLang 配信の手前に LiteLLM、`chat_template_kwargs` が効くので thinking は
+オフ）、ブリッジ経由・ウォーム状態で20回の中央値:
 
 ```
-1問  (noul)              median ~83〜111 ms
-3問  (choice+noul+score) median ~161〜228 ms   ← 3問は並列実行
+1問  (noul)                111 ms   (p10 105 / p90 138)
+3問  (choice+noul+score)   201 ms   (p10 193 / p90 208)
+6問                        366 ms   (p10 357 / p90 383)
+
+3問 x 4リクエスト同時      138 ms/件   (4件で 550 ms)
+3問 x 8リクエスト同時      135 ms/件   (8件で 1079 ms)
 ```
 
-再現: `python examples/bench.py http://127.0.0.1:8900`。
+1リクエスト内の各質問は並列で発行します（`JEVB_MAX_CONCURRENCY`、既定8）。
+上に残る差はブリッジではなくバックエンドのもので、同じエンドポイントを
+シリアルに叩くと単一の first-token 呼び出しは 106 ms、同時発行すると
+16〜22 件/s 付近で頭打ちです（同時3 → 191 ms、12 → 548 ms）。ブリッジ自身の
+オーバーヘッドは 111 ms の誤差範囲の中です。
+
+再現: `python examples/bench.py http://127.0.0.1:8900 20`。
 比較として、TypeSafe はホスト版 Jev で 70〜500 ms と公表しており、
 コミュニティ計測では3問バッチで約212 ms という値もあります。
 
-同じブリッジで **公式 OpenAI API** を叩いた値（`JEVB_DISABLE_THINKING=0`、
+公式 OpenAI API を同じブリッジで叩いた値（`JEVB_DISABLE_THINKING=0`、
 `JEVB_PREFILL_ASSISTANT=0`、ウォーム状態6回の中央値、ネットワーク込み）:
 
 ```

@@ -368,18 +368,27 @@ Notes:
 
 ## Performance
 
-Measured end to end (HTTP server, warm) on a single RTX PRO 6000 with
-**Qwen3.8-Flash-Next** served by SGLang (OpenAI-compatible endpoint):
+Measured end to end, warm, on a single **RTX PRO 6000** running
+**Qwen3.8-Flash-Next** on an OpenAI-compatible endpoint (vLLM/SGLang served, a
+LiteLLM gateway in front, `chat_template_kwargs` honoured so thinking is off),
+median of 20 runs through the bridge:
 
 ```
-1 question  (noul)              median ~83–111 ms
-3 questions (choice+noul+score) median ~161–228 ms   <- all three in parallel
+1 question  (noul)               111 ms   (p10 105 / p90 138)
+3 questions (choice+noul+score)  201 ms   (p10 193 / p90 208)
+6 questions                      366 ms   (p10 357 / p90 383)
+
+4x 3q at once                    138 ms/request   (550 ms wall for four)
+8x 3q at once                    135 ms/request   (1079 ms wall for eight)
 ```
 
-(Range across warm runs / cache states; all three questions of a request run
-concurrently, so three questions cost far less than 3x one question.)
+The questions of one request are issued concurrently (`JEVB_MAX_CONCURRENCY`,
+default 8), and what is left of that growth belongs to the backend rather than to
+the bridge: the same endpoint answers a lone first-token call in 106 ms serially
+and tops out around 16–22 calls/s under concurrency (3 in flight → 191 ms wall,
+12 → 548 ms). Bridge overhead sits inside the noise of that 111 ms.
 
-Reproduce with `python examples/bench.py http://127.0.0.1:8900`. For
+Reproduce with `python examples/bench.py http://127.0.0.1:8900 20`. For
 comparison, TypeSafe reports 70–500 ms for hosted Jev and a community
 measurement found 3 batched questions at ~212 ms.
 
