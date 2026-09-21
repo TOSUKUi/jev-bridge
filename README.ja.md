@@ -198,13 +198,29 @@ seed はなく、httpx は固定のキー順で JSON 化するので、同じ入
   温まった state を二重に prime せず、発動時は `usage.prefix_primed` に出ます。
 
 正直な結論: この経路では prime は**ペイしません**。cold リクエストは 6問で
-並列 1163 ms / prime 1255 ms、4問で 1068 ms / 1147 ms。手でやっても同じで、
-安い1問だけのリクエストを先に飛ばしてから本体（4問）を投げると 1083 ms vs 1190 ms
-でした。primer 自体に ~300 ms かかり、その直後に飛ぶ仲間は温まったはずなのに
-~880 ms（温まった実測は 215 ms）かかる。狙っている対象（cold prefix への
-prefill × N）は実在するので、上の直列/並列の実測は本物です。primer がこれを回収
-できなかったのも同じ経路での実測なので、当てる前に単一 vLLM/SGLang レプリカ
-（プレフィックスキャッシュ on）で測り直してください。
+並列 1163 ms / prime 1255 ms、4問で 1068 ms / 1147 ms。ブリッジが実際に送っている
+ボディをスタブサーバーで捕捉してそのまま再生しても同じで（4問のうち 9052 / 9350
+文字がバイト一致＝並びは意図どおり共有プレフィックスになっている）、無prime 699 ms
+vs primer あり 791 ms。理由はプリミングの実装でなく算術です。primer は N本のうち
+1本が同じ prefill を前倒しでやるだけなので、よくて (N−1)/N 分の prefill 節約、
+そのために先行して1往復まるごと払う。効くのは「共有プレフィックスがプロンプトの
+大半を占める（state は長く質問文は1行）＋ primer をリクエストの外提前に撃つ」場合だけです。
+
+提前ウォームするなら安い撃ち方は `max_tokens: 0`。SGLang は prefill-only で走り
+（`completion_tokens: 0`）、llama.cpp も `n_predict: 0` と文書化されています。実測では
+4.1k-token の prefix で cold 234〜448 ms / 温後 117 ms、この後に4問を流すと 841 ms →
+217 ms。ただしリクエストの中で待つ形だと上の先行1往復そのものなので、spec が変わった時か
+アイドル時に撃ってください。注意が2つ: `max_tokens` と書くこと（下の SGLang 節）、
+そして `usage.prompt_tokens_details.cached_tokens` はサーバー起動時に
+`--enable-cache-report` を付けていないと出ません（フィールドが無いのはミスではなく未計測）。
+
+プロンプトの安定部分が state ではなく**判定JSON（質問spec）**側で、state の方が毎回
+変わる（ゲームループなど）なら、`state` を1本の文字列にして spec を先に置いてください:
+`state = "<判定JSON>\n\n<現在のコンテキスト>"`。`serialize_state` は文字列をそのまま
+返すので、キャッシュされる prefix は system+spec になり、spec 側は全リクエストで
+再利用されて末尾のコンテキストだけ再 prefill します。4.1k-token の spec で実測:
+初回 519 ms、spec を使い回してコンテキストだけ変えて 173 ms、spec 単体に
+`max_tokens: 0` の primer を撃つと4問並列の burst が 849 ms → 490 ms。
 
 ブリッジが**送っていないもの**: `prompt_cache_key`、セッション id、カスタム
 ヘッダー（ヘッダー設定は無く、固定値のボディフィールドなら `JEVB_BACKEND_EXTRA_BODY`
@@ -297,7 +313,7 @@ Jev 本体はテキスト専用のため、`images` は jev-bridge の拡張で�
 ## 性能
 
 **RTX PRO 6000 1枚** で **Qwen3.8-Flash-Next** を OpenAI 互換エンドポイント経由
-（配得手前に LiteLLM。`chat_template_kwargs` が効くので thinking はオフ）、
+（配得手前に LiteLLM、その先は SGLang。`chat_template_kwargs` が効くので thinking はオフ）、
 ブリッジ経由・ウォーム状態で20回の中央値:
 
 ```
@@ -471,8 +487,18 @@ docker run --rm -p 8900:8900 \
   jev-bridge
 ```
 
-SGLang（`python -m sglang.launch_server --model …`）も同じ形です。なお
-[性能](#性能) の実測値は SGLang 構成でのものです。
+SGLang（`python -m sglang.launch_server --model … --enable-cache-report`）も同じ形で、
+[性能](#性能) の実測はこの構成（配得手前に LiteLLM）でのものです。SGLang について
+知っておくべき点が2つ:
+
+* `max_tokens: 0` は文字どおり prefill-only リクエストです（`is_prefill_only` 経路では
+  デコードがスケジューリングされず、`completion_tokens: 0` が返る）。radix cache も温まります。
+  一方 `max_completion_tokens: 0` は**同じ意味になりません**：内部で
+  `max_completion_tokens or max_tokens` と読まれるので 0 が消え、予算が `1 << 30` に
+  なります。実測では 292 トークン生成されました。ゼロを意図するなら `max_tokens` を送ってください
+  （speculative decoding を有効にすると prefill-only の高速経路は無効になります）。
+* `usage.prompt_tokens_details.cached_tokens` は `--enable-cache-report` を付けたときだけ
+  返ります。無いとヒットしても `usage` には何も出ません。
 
 ## CLI
 

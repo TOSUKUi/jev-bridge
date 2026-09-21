@@ -205,15 +205,33 @@ Two levers, both opt-in:
   state is never primed twice, and `usage.prefix_primed` reports when it happens.
 
 Honest verdict: on this route priming **does not pay**. Cold requests took
-1163 ms all-parallel vs 1255 ms primed at 6 questions, and 1068 vs 1147 ms at 4
-questions. A hand-rolled client-side primer (one cheap single-question call,
-then the real request) reproduced it: 1083 ms vs 1190 ms — the primer costs ~300
-ms and the follower burst, fired the instant it returns, still costs ~880 ms
-instead of the warmed 215 ms. The gap it targets is real (prefill × N on a cold
-prefix), the recovery was not measurable here. Every timing above comes from this
-same route, so the cold penalty is real and the primer simply failed to recover
-it here — re-test it against a single vLLM/SGLang replica with prefix caching on
-before relying on it.
+1163 ms all-parallel vs 1255 ms primed at 6 questions, and 1068 vs 1147 ms at 4.
+Replaying the exact bodies the bridge sends (captured against a stub backend —
+9052 of 9350 characters are byte-identical across the four questions, so the
+layout does share a prefix as intended) says the same: 699 ms unprimed vs 791 ms
+primed. It is arithmetic, not plumbing: the primer is one of the N calls doing
+the same prefill, so it saves at most (N−1)/N of that work while costing a full
+sequential round trip up front. It pays only when the shared prefix dominates the
+prompt (long state, one-line questions) and you fire the primer *ahead of* the
+request rather than inside it.
+
+If you do warm ahead, the cheap call is `max_tokens: 0` — SGLang runs it as
+prefill-only (`completion_tokens: 0`), llama.cpp documents the same as
+`n_predict: 0`. Measured here: 234–448 ms cold for a 4.1k-token prefix, 117 ms
+once warm, and a following 4-question burst drops from 841 ms to 217 ms. Warm it
+when the spec changes or on idle, not inside the request. Two traps: it must be
+spelled `max_tokens` (see the SGLang note below), and `cached_tokens` is invisible
+in `usage` unless the server was started with `--enable-cache-report` — a missing
+field is not a cache miss.
+
+If the stable part of your prompt is the **question spec** and the state is what
+changes (a game loop, say), pass one string as `state` with the spec first:
+`state = "<judgment JSON>\n\n<current context>"`. `serialize_state` returns a
+string untouched, so the cached prefix becomes system+spec, and the spec half is
+reused across every request while only the context tail re-prefills — measured on
+a 4.1k-token spec: first request 519 ms, same spec with a fresh context 173 ms,
+and a `max_tokens: 0` primer on the spec alone takes a 4-question concurrent burst
+from 849 ms to 490 ms.
 
 What the bridge does **not** send: `prompt_cache_key`, a session id, or any
 custom header (there is no header configuration; a constant body field can be
@@ -392,8 +410,20 @@ docker run --rm -p 8900:8900 \
   jev-bridge
 ```
 
-The same shape covers SGLang (`python -m sglang.launch_server --model …`) — that
-is the configuration the [Performance](#performance) numbers were measured on.
+The same shape covers SGLang (`python -m sglang.launch_server --model …
+--enable-cache-report`) — that is the configuration the
+[Performance](#performance) numbers were measured on, behind a LiteLLM gateway.
+Two SGLang specifics worth knowing:
+
+* `max_tokens: 0` is a genuine prefill-only request (SGLang's `is_prefill_only`
+  path schedules no decode step, and the response carries `completion_tokens: 0`),
+  and it warms the radix cache. `max_completion_tokens: 0` is **not** the same
+  request: the field is read as `max_completion_tokens or max_tokens`, so the 0
+  vanishes and the budget becomes `1 << 30` — measured, it generated 292 tokens.
+  When you mean zero, send `max_tokens`. (Speculative decoding disables the
+  prefill-only fast path.)
+* `usage.prompt_tokens_details.cached_tokens` appears only with
+  `--enable-cache-report`; otherwise a cache hit leaves no trace in `usage`.
 
 ## CLI
 
@@ -445,7 +475,7 @@ Notes:
 
 Measured end to end, warm, on a single **RTX PRO 6000** running
 **Qwen3.8-Flash-Next** behind an OpenAI-compatible endpoint (a LiteLLM gateway in
-front of the model server; `chat_template_kwargs` is honoured there, so thinking
+front of an SGLang server; `chat_template_kwargs` is honoured there, so thinking
 is off), median of 20 runs through the bridge:
 
 ```
