@@ -184,11 +184,15 @@ Measured on the Qwen3.8-Flash-Next endpoint described in
 | ~2.8k tokens of state | 293 ms | — |
 
 So a cached prefix is close to free (~+30 ms for 2k tokens) while a cold prefill
-costs roughly +40 ms per extra 1k tokens. The interesting part is what fan-out
-does to that: four different questions over the *same cold* 2.7k-token prefix
-took **665 ms sequential** and **880 ms concurrent**. The backend serialises
-prefill work anyway, so sending them all at once forfeits the reuse the first
-question would have created.
+costs roughly +40 ms per extra 1k tokens. Concurrency is what makes the warm path
+worth having: four questions over a **warm** prefix took **215 ms concurrent** vs
+**468 ms sequential**, so keep the fan-out once the state is warm (and note the
+warm hit is served from a brand-new connection pool too — 225 ms — it is not
+pinned to a connection). The cold case is the one to know about: the same four
+questions over the *same cold* 2.7k-token prefix took **665 ms sequential** and
+**880 ms concurrent**. Requests are admitted together, so none of them can reuse
+a prefix that is only committed when the first prefill finishes — every request
+in a cold burst prefills.
 
 Two levers, both opt-in:
 
@@ -200,12 +204,16 @@ Two levers, both opt-in:
   the rest fan out. Tracked per state for `JEVB_PRIME_TTL` seconds, so a warm
   state is never primed twice, and `usage.prefix_primed` reports when it happens.
 
-Be honest about the second one: on this deployment (a LiteLLM router in front of
-several workers) priming measured **+76 ms slower** for a 6-question cold request
-(1265 ms vs 1189 ms), because the bridge sends no cache-affinity key and the
-primed worker is not necessarily the one that serves the rest. It earns its keep
-on a **single-worker** vLLM/SGLang replica with prefix caching on, where the
-sequential/concurrent gap above is the whole story.
+Honest verdict: on this route priming **does not pay**. Cold requests took
+1163 ms all-parallel vs 1255 ms primed at 6 questions, and 1068 vs 1147 ms at 4
+questions. A hand-rolled client-side primer (one cheap single-question call,
+then the real request) reproduced it: 1083 ms vs 1190 ms — the primer costs ~300
+ms and the follower burst, fired the instant it returns, still costs ~880 ms
+instead of the warmed 215 ms. The gap it targets is real (prefill × N on a cold
+prefix), the recovery was not measurable here. Every timing above comes from this
+same route, so the cold penalty is real and the primer simply failed to recover
+it here — re-test it against a single vLLM/SGLang replica with prefix caching on
+before relying on it.
 
 What the bridge does **not** send: `prompt_cache_key`, a session id, or any
 custom header (there is no header configuration; a constant body field can be
@@ -214,8 +222,8 @@ prompt caching is automatic for prompts of **1024 tokens or more**
 (`usage.prompt_tokens_details.cached_tokens` reports the hit, eviction after ~5–10
 min idle), and a typical jev-bridge template is ~110–200 tokens, i.e. below the
 threshold and never cached. OpenAI's own guidance to set `prompt_cache_key` is
-about routing requests with a shared prefix to the same cache, which is exactly
-the multi-worker problem above.
+about pinning requests that share a prefix to the same cache — relevant as soon
+as a gateway fans one state's questions out over several replicas.
 
 ## Thinking models (Qwen3.x, …)
 
