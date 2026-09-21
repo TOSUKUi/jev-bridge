@@ -224,6 +224,27 @@ spelled `max_tokens` (see the SGLang note below), and `cached_tokens` is invisib
 in `usage` unless the server was started with `--enable-cache-report` — a missing
 field is not a cache miss.
 
+The match is a plain forward match on the **rendered token sequence from token 0**
+— not per message. Reuse length is the longest common prefix with something
+already cached, cut off at a block/page boundary (vLLM caches full blocks only,
+SGLang inserts at `page_size`), and a block is only insertable once its prefill
+has run. Consequences, measured on this endpoint with a ~1.9k-token seed:
+
+| prompt | ms | prompt tokens |
+|---|---|---|
+| seed, first touch | 233 | 1941 |
+| same prefix, 0 appended | 126 | 1941 |
+| same prefix, +910 tokens appended | 152 | 2851 |
+| same prefix, +1860 tokens appended | 216 | 3801 |
+| same prefix, only the question changed | 128–131 | 1946 |
+| one nonce inserted at the very front | 214–219 | 1945 |
+
+So appending is nearly free (you pay the new tail) while one changed byte at the
+front throws the whole prefix away. Watch for nonces, timestamps, turn counters
+and reordered JSON keys — and note that eviction takes the deepest tail first
+(SGLang evicts radix leaves, vLLM frees in reverse order), so the long context is
+what you lose when memory gets tight, not the stable head.
+
 If the stable part of your prompt is the **question spec** and the state is what
 changes (a game loop, say), pass one string as `state` with the spec first:
 `state = "<judgment JSON>\n\n<current context>"`. `serialize_state` returns a
