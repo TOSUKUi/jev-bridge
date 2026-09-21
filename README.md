@@ -152,16 +152,46 @@ confidence.** Treat thresholds as drift-prone and validate them on your task.
 
 ## Thinking models (Qwen3.x, …)
 
-Thinking models emit `<think>` as their first token, which is not an answer
-label. `jev-bridge` handles this with **two layers, on by default**:
+**The principle: the score comes from the first sampled token.** Anything the
+model emits before the answer label costs the request its signal, so reasoning
+has to be switched off at the source. `jev-bridge` does this with **two layers,
+on by default**:
 
-1. **`enable_thinking: false`** is sent via `chat_template_kwargs` so the
-   backend's own chat template opens the assistant turn with an empty
-   `<think>\n\n</think>\n\n` block — this is the reliable path on Qwen3-style
-   templates (SGLang/vLLM). If the backend rejects the field (HTTP 400/422),
-   the bridge automatically retries without it and remembers that.
-2. **Assistant prefill `<think></think>`** is appended to the messages, which
-   covers backends/templates where the server-side flag is unavailable.
+1. **`chat_template_kwargs: {"enable_thinking": false, "preserve_thinking": false}`**
+   makes the backend's own chat template open the assistant turn with an empty
+   `<|im_start|>\n\n</think>\n\n` block — this is the switch that actually works on
+   Qwen3-style templates (SGLang, vLLM, current llama.cpp). If the backend
+   *rejects* the field (HTTP 400/422) the bridge automatically retries without it
+   and remembers that; if it silently *ignores* it, no retry fires and you get
+   the flat answers described below.
+2. **Assistant prefill `<|im_start|>assistant` `<|im_start|>\n\n</think>\n\n`**
+   is appended to the messages. This only helps where the server honours
+   continuation prefill (llama.cpp does) — measured through a LiteLLM proxy, an
+   endpoint that reads the assistant turn as plain context gained nothing from it.
+
+Backends that speak `reasoning_effort` instead of template kwargs take it through
+`JEVB_BACKEND_EXTRA_BODY`:
+
+```bash
+export JEVB_BACKEND_EXTRA_BODY='{"reasoning_effort":"none"}'
+```
+
+Two measured caveats: an effort *level* is not an off-switch (`low` still opened
+with reasoning text on a Qwen3 reasoner), and a value the server does not accept
+comes back as HTTP 400 surfaced as 502 — the backend's own message names the
+values it accepts.
+
+**What "reasoning is not off" looks like in the answers:** every option lands on
+the same probability and confidence collapses —
+
+```
+choice → probabilities {"a": 0.3333, "b": 0.3333, "c": 0.3333}, confidence 0.0      noul → 0.5
+```
+
+A flat distribution on a model you expect to be confident means this, not a bad
+model. Behind a proxy, verify it on the wire: `logprobs` coming back does not
+prove `chat_template_kwargs` arrived (and LiteLLM with `drop_params: true` drops
+`logprobs` while still answering 200).
 
 Tune with `JEVB_DISABLE_THINKING=0` and/or `JEVB_PREFILL_ASSISTANT=0`. To pass
 custom template kwargs instead, use `JEVB_BACKEND_EXTRA_BODY` — it takes

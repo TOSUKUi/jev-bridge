@@ -152,17 +152,42 @@ Jev の公開サンプルで観測できる confidence 値（例: `{0.0, 0.7, 0.
 ## thinking モデル（Qwen3.x など）の扱い
 
 thinking モデルは最初のトークンに `<think>` を出しますが、これは回答ラベルではありません。
-`jev-bridge` はデフォルトで**2段構え**で対処します:
+**原則は「スコアは最初の1トークンから作る」**。モデルが回答ラベルの前に何か出力した時点で
+シグナルを失うので、thinking はソース側で消す必要がある。`jev-bridge` はデフォルトで
+**2段構え**で対処します:
 
-1. **`enable_thinking: false`** を `chat_template_kwargs` で送る。バックエンド側の
-   chat template が assistant ターンを空の `<think>\n\n</think>\n\n` で開くため、
-   Qwen3 系テンプレート（SGLang / vLLM）ではこれが確実な経路。バックエンドがこの
-   フィールドを拒否した場合（HTTP 400/422）は自動で外して再試行し、以後その状態を記憶する。
-2. **assistant プレフィル `<think></think>`** をメッセージ末尾に付与。サーバ側フラグが使えない
-   バックエンド／テンプレートをカバーする。
+1. **`chat_template_kwargs: {"enable_thinking": false, "preserve_thinking": false}`** を
+   送る。バックエンド側の chat template が assistant ターンを空の `<think>\n\n</think>\n\n` で開くため、
+   Qwen3 系テンプレート（SGLang / vLLM / 現行 llama.cpp）で実際に効くのはこちら。バックエンドが
+   このフィールドを**拒否**した場合（HTTP 400/422）は自動で外して再試行し、以後その状態を
+   記憶する。**黙って無視**された場合はリトライは発火せず、下記の症状そのままになる。
+2. **assistant プレフィル `<think></think>`** をメッセージ末尾に付与。継続プレフィルを尊重するサーバー（llama.cpp など）でしか
+   効かず、assistant 発話を単なる文脈として読むサーバーでは効かない（LiteLLM 経由で実測）。
 
-`JEVB_DISABLE_THINKING=0` や `JEVB_PREFILL_ASSISTANT=0` で個別に切れます。
-テンプレート引数を直接渡したい場合は `JEVB_BACKEND_EXTRA_BODY` を使います（組み込みの既定より優先）。
+`reasoning_effort` で制御するバックエンド（公式 OpenAI や多くのプロキシ）は
+`JEVB_BACKEND_EXTRA_BODY` で送る:
+
+```bash
+export JEVB_BACKEND_EXTRA_BODY='{"reasoning_effort":"none"}'
+```
+
+実測の注意が2つ。effort の**レベル**は off スイッチではない（Qwen3 の reasoner で `low`
+を送っても reasoning で始まった）。サーバーが受け付けない値は HTTP 400 が 502 として
+返り、エラー本文に受理される値が書かれている。
+
+**thinking が消えていないときの回答の見た目:** 全選択肢が同じ確率になり confidence が
+落ちる —
+
+```
+choice → probabilities {"a": 0.3333, "b": 0.3333, "c": 0.3333}, confidence 0.0      noul → 0.5
+```
+
+信頼できるはずのモデルで一律分布を見たら、モデルのせいではなくこれを疑う。プロキシ経由なら
+実線でも確認すること。`logprobs` が返ることと `chat_template_kwargs` が届いたことは別問題で、
+LiteLLM は `drop_params: true` にすると `logprobs` を落として 200 を返す。
+
+個別のオン/オフは `JEVB_DISABLE_THINKING=0` / `JEVB_PREFILL_ASSISTANT=0`。
+テンプレート引数を直接渡したい場合は `JEVB_BACKEND_EXTRA_BODY`（組み込みの既定より優先）。
 
 ## 画像入力（拡張）
 

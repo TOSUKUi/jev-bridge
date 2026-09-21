@@ -1,0 +1,115 @@
+{
+  "runId": "b3771df8-1079-49d6-b4dd-27292c42a1b0",
+  "agent": "researcher",
+  "task": "Answer with primary sources (LiteLLM docs at docs.litellm.ai, BerriAI/litellm GitHub code/issues — cite URLs).\n\nContext: a client POSTs to an OpenAI-compatible {base_url}/chat/completions with this body:\n{\"model\": \"...\", \"messages\": [...], \"temperature\": 0.0, \"max_tokens\": 1, \"logprobs\": true, \"top_logprobs\": 20, \"chat_template_kwargs\": {\"enable_thinking\": false, \"preserve_thinking\": false}}\nand reads choices[0].logprobs.content[0].top_logprobs = [{token, logprob}, ...]. The top-K logprob list must survive a LiteLLM proxy round trip (BerriAI/litellm, current version ~1.10x).\n\nAnswer these, each with a citation:\n1. Does the LiteLLM proxy return logprobs / top_logprobs for chat completions? Which providers support it (look for supports_logprobs / supports_top_logprobs capability flags in the supported-params code and the model cost map)?\n2. If a provider does not support logprobs: 400 error, silent drop, or error unless drop_params=True? What is the default of drop_params?\n3. Are unknown/non-standard top-level body params such as chat_template_kwargs forwarded to an upstream OpenAI-compatible server when the deployment is declared as model: openai/<name> with an api_base? If not forwarded by default, what documented setting makes it pass through (extra_body, openai_extra_params, additional params passthrough, wildcard config)?\n4. Known bugs: search GitHub issues for litellm + logprobs (\"logprobs not returned\", \"top_logprobs dropped\", \"logprobs proxy\"). Open or fixed? Which release?\n5. Anything about logprobs being stripped when LiteLLM transforms a response (non-OpenAI providers, guardrails, logging hooks).\n\nOutput format, keep it short:\nVERDICT: works | works-with-config | broken\nCONFIG: minimal litellm config.yaml snippet if any setting is needed\nCAVEATS: bullet list, each with its source URL\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/amemiya/work/jev-bridge/.pi-subagents/artifacts/outputs/b3771df8-1079-49d6-b4dd-27292c42a1b0/research.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return concrete findings with file paths and severity when applicable\n\nRequired evidence: review-findings, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 1,
+  "model": "litellm/local:high",
+  "attemptedModels": [
+    "litellm/local:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "litellm/local:high",
+      "success": false,
+      "exitCode": 1,
+      "error": "Agent 'researcher' requested unavailable child tools: fetch_content, get_search_content.\nThe `tools` field is a strict allowlist; it does not load extension code.\nFor extension tools, add the provider path to `subagentOnlyExtensions` (child-only), `extensions`, or as a path-like entry in `tools`, while keeping each registered tool name in `tools`.\nFor MCP tools, verify the MCP adapter configuration and selected tool names. For builtin tools, verify the name against the installed Pi version.",
+      "usage": {
+        "input": 1326765,
+        "output": 27563,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0,
+        "turns": 18
+      }
+    }
+  ],
+  "error": "Agent 'researcher' requested unavailable child tools: fetch_content, get_search_content.\nThe `tools` field is a strict allowlist; it does not load extension code.\nFor extension tools, add the provider path to `subagentOnlyExtensions` (child-only), `extensions`, or as a path-like entry in `tools`, while keeping each registered tool name in `tools`.\nFor MCP tools, verify the MCP adapter configuration and selected tool names. For builtin tools, verify the name against the installed Pi version.",
+  "acceptance": {
+    "status": "attested",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Findings cite file paths and severities: litellm/litellm_core_utils/get_supported_openai_params.py, litellm/llms/hosted_vllm/chat/transformation.py, litellm/llms/openai/chat/gpt_transformation.py, litellm/types/utils.py#L840, litellm/proxy/litellm_pre_call_utils.py + litellm/utils.py::get_optional_params. Severity roll-up: high = drop_params:true silently deletes logprobs (docs.litellm.ai/docs/completion/drop_params), extra_body double-nesting bug #18039; medium = chat_template_kwargs passthrough (#26443, PR #31697, #25697), streaming+logprobs #18801 (open); low = top_logprobs:null fixed by PR #22245 merged 2026-02-28 commit d524b795."
+        }
+      ],
+      "changedFiles": [
+        "/home/amemiya/work/jev-bridge/.pi-subagents/artifacts/outputs/b3771df8-1079-49d6-b4dd-27292c42a1b0/research.md"
+      ],
+      "testsAddedOrUpdated": [],
+      "commandsRun": [
+        {
+          "command": "web_search x14 across 6 research angles (capability table, drop_params default, chat_template_kwargs/extra_body passthrough, logprobs GitHub issues, response-transform stripping, release/version anchor)",
+          "result": "passed",
+          "summary": "Primary docs + GitHub issues/PRs retrieved; anchored current version v1.100.0 and fix PR #22245."
+        }
+      ],
+      "validationOutput": [
+        "VERDICT works-with-config: logprobs/top_logprobs preserved for openai/-prefix + api_base non-streaming calls; capability via get_supported_openai_params(), not supports_* flags.",
+        "drop_params default False -> unsupported param raises, proxied as 400; drop_params: true turns it into a silent drop.",
+        "top_logprobs null-normalisation fix merged 2026-02-28 (PR #22245), so included in the current 1.10x line."
+      ],
+      "residualRisks": [
+        "chat_template_kwargs passthrough is documented but has open defects (#26443, PR #31697) and a same-family crash (#25697); must be confirmed on the wire with an echo/mock upstream so logprobs success isn't mistaken for param forwarding.",
+        "Unknown whether guardrails/callbacks strip logprobs from the client-visible response; no evidence found either way.",
+        "Streaming + logprobs on vLLM backends still broken (#18801, open) — keep the classifier call non-streaming.",
+        "Evidence came from search-engine extracts rather than raw page fetches (no fetch tool in this run); model_prices_and_context_window.json (1.8MB binary on GitHub) could not be grepped to prove absence of supports_logprobs keys.",
+        "No local litellm install inspected; passthrough code path inferred from docs + issues."
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "Added one research artifact (research.md) with VERDICT/CONFIG/CAVEATS, numbered findings, kept/dropped sources, gaps, and severity roll-up. No code changes.",
+      "reviewFindings": [
+        "no blockers",
+        "advisory: docs.litellm.ai/docs/completion/drop_params - do not ship drop_params:true on the classifier's deployment; it deletes logprobs silently instead of 400ing",
+        "advisory: github.com/BerriAI/litellm/issues/18039 (closed-as-stale, unfixed) - avoid relying on extra_body for chat_template_kwargs without a wire-level check",
+        "advisory: github.com/BerriAI/litellm/issues/18801 (open) - streaming+logprobs fails on vLLM backends"
+      ],
+      "manualNotes": "The question's premise about supports_logprobs/supports_top_logprobs flags is inaccurate for LiteLLM: capability is OpenAI param-name strings via litellm.get_supported_openai_params(); structured ProviderCapabilities (PR #30032) is still open. Next step: run the curl probe in the artifact against the live deployment plus an echo upstream."
+    }
+  },
+  "transcriptPath": "/home/amemiya/work/jev-bridge/.pi-subagents/artifacts/b3771df8-1079-49d6-b4dd-27292c42a1b0_researcher_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1789967974433
+}

@@ -1,0 +1,80 @@
+{
+  "runId": "8474ea29-1966-4407-9bd5-1e6524ea6190",
+  "agent": "researcher",
+  "task": "Research question: does a client that POSTs to an OpenAI-compatible /v1/chat/completions endpoint work correctly when routed through a LiteLLM proxy (BerriAI/litellm, current version)?\n\nThe client sends this exact JSON body to {base_url}/chat/completions:\n{\"model\": \"...\", \"messages\": [...], \"temperature\": 0.0, \"max_tokens\": 1, \"logprobs\": true, \"top_logprobs\": 20, \"chat_template_kwargs\": {\"enable_thinking\": false, \"preserve_thinking\": false}}\nand then reads choices[0].logprobs.content[0].top_logprobs = [{token, logprob}, ...]. It needs the top-K logprob list to survive the proxy round trip.\n\nAnswer these specific questions with primary sources (LiteLLM docs at docs.litellm.ai, and BerriAI/litellm GitHub issues/code — cite URLs and note version/date):\n1. Does the LiteLLM proxy return `logprobs` / `top_logprobs` for chat completions? Is it supported for all providers or only some? Look for the `supports_logprobs` / `supports_top_logprobs` capability flags in LiteLLM's supported-params machinery and which providers set them.\n2. When a provider does not support logprobs, does LiteLLM (a) reject the request with 400, (b) silently drop it, or (c) error only when `drop_params=False`? What is the default behavior of `drop_params` for unknown/unsupported params?\n3. Does LiteLLM forward unknown/non-standard top-level body params such as `chat_template_kwargs` (vLLM/SGLang extension) to an upstream OpenAI-compatible server (e.g. model name `openai/Qwen3-8B` with a vLLM api_base)? Or are they dropped/rejected? Is there a documented way to pass them through (extra_body, additional_drop_params, openai_extra_params, wildcards, `litellm_extra_body`, passthrough settings)?\n4. Does a `max_tokens: 1` + `logprobs: true` request survive unchanged (no forced streaming, no rewriting of max_tokens, no router-level retries that would double the cost)?\n5. Known issues: search GitHub issues for \"logprobs\" + litellm proxy (especially \"logprobs not returned\"/\"top_logprobs dropped\"), note whether they are open/closed and in which release they were fixed.\n6. Anything about LiteLLM stripping `logprobs` when the response is transformed (e.g. anthropic/bedrock/google providers) or when using guardrails/hooks.\n\nReturn a short brief: a VERDICT line (works / works-with-config / broken), the exact config keys needed if it works-with-config (a minimal litellm config.yaml example), and the caveats. Prefer current-version facts and say so.\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/amemiya/work/jev-bridge/.pi-subagents/artifacts/outputs/8474ea29-1966-4407-9bd5-1e6524ea6190/research.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return concrete findings with file paths and severity when applicable\n\nRequired evidence: review-findings, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 1,
+  "model": "litellm/glm5.3-flash:high",
+  "attemptedModels": [
+    "litellm/glm5.3-flash:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "litellm/glm5.3-flash:high",
+      "success": false,
+      "exitCode": 1,
+      "error": "Subagent stopped by user.",
+      "usage": {
+        "input": 55109,
+        "output": 2055,
+        "cacheRead": 156864,
+        "cacheWrite": 0,
+        "cost": 0,
+        "turns": 5
+      }
+    }
+  ],
+  "error": "Subagent stopped by user.",
+  "acceptance": {
+    "status": "rejected",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [
+      {
+        "id": "stopped",
+        "status": "failed",
+        "message": "Acceptance was not evaluated because the subagent was stopped."
+      }
+    ],
+    "verifyRuns": []
+  },
+  "transcriptPath": "/home/amemiya/work/jev-bridge/.pi-subagents/artifacts/8474ea29-1966-4407-9bd5-1e6524ea6190_researcher_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1789967654714
+}
