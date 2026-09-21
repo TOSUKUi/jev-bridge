@@ -9,11 +9,11 @@
 services:
   jev-bridge:
     image: ghcr.io/yourname/jev-bridge:latest
-    # or build from this repo:
-    # build: ..
+    # or build from this repo (context is the repo root):
+    # build: .
     environment:
-      JEVB_BACKEND_BASE_URL: http://host.docker.internal:30010/v1
-      JEVB_BACKEND_MODEL: qwen3.8-flash-next
+      JEVB_BACKEND_BASE_URL: http://host.docker.internal:4000/v1
+      JEVB_BACKEND_MODEL: nv-qwen-general
       JEVB_MAX_CONCURRENCY: "8"
       # Qwen3.x: empty think-block via the chat template (backend-native way)
       # instead of the assistant prefill:
