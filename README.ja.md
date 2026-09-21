@@ -21,9 +21,11 @@ client ──POST /v1/systemone──▶ jev-bridge ──POST /chat/completions
 instruct モデルで分類をするとき、普通は「JSON で答えてください」とプロンプトして祈るしかありません。
 `jev-bridge` はそうではなく:
 
-1. **state を共通の system メッセージ**に置き、各質問を user ターンにする。
-   1リクエスト内の全質問が同一プレフィックスを共有するため、プレフィックスキャッシュを持つ
-   バックエンド（SGLang の radix cache、vLLM の APC）では state の prefill が1回で済む。
+1. **state を最初の user ターンに**置きます（system は状態を一切含まない固定文）。
+   質問を同じ user ターンの state の後に続けるので、1リクエスト内の全質問は
+   質問文ブロックまで同一バイトのプレフィックスを共有します。プレフィックスキャッシュを
+   持つバックエンド（SGLang の radix cache、vLLM の APC）では state の prefill を
+   再利用できます。実測値は [プロンプトキャッシュ](#プロンプトキャッシュ) 節に。
 2. 回答候補を**単一トークンのラベル**（`A`/`B`/`C…`、`true`/`false`、`0`/`1`/`2…`）として提示し、
    ラベルを1つだけ出力させる。
 3. `max_tokens=1` + `logprobs` + `top_logprobs` で次トークン分布を取得し、
@@ -137,6 +139,9 @@ curl -s http://127.0.0.1:8900/v1/systemone -H 'Content-Type: application/json' -
 | `JEVB_PREFILL_ASSISTANT` | `1` | `<think></think>` プレフィルを assistant メッセージに付与 |
 | `JEVB_DISABLE_THINKING` | `1` | `chat_template_kwargs: {enable_thinking: false, preserve_thinking: false}` を送る。バックエンドに拒否されたら自動で外して再試行 |
 | `JEVB_BACKEND_EXTRA_BODY` | — | 毎回の chat-completions ボディにマージする JSON。例 `{"chat_template_kwargs":{"enable_thinking":false}}`。ここに `max_completion_tokens` を指定すると、トークン予算を入れるフィールド名もこれに切り替わる |
+| `JEVB_PRIME_PREFIX` | `0` | 1問目だけ単独で送信し、共有プレフィックスをキャッシュしてから残りを出線（[プロンプトキャッシュ](#プロンプトキャッシュ) 参照） |
+| `JEVB_PRIME_MIN_STATE_CHARS` | `1200` | シリアライズ後の state がこの文字数以上のときだけ prime する |
+| `JEVB_PRIME_TTL` | `300` | prime 済み state を憶えておく秒数 |
 | `JEVB_MODEL_NAME` | `jev-bridge-1` | リクエストに `model` がない場合に報告するモデル名 |
 | `JEVB_HOST` / `JEVB_PORT` | `0.0.0.0` / `8900` | `jev-bridge serve` の待ち受けアドレス |
 
@@ -148,6 +153,62 @@ Jev の公開サンプルで観測できる confidence 値（例: `{0.0, 0.7, 0.
 
 **ここでの confidence は分布形状の統計量であり、Jev の RLCD 較正済み confidence ではありません。**
 閾値はドリフトし得るものとして扱い、自分のタスクで検証してください。
+
+## プロンプトキャッシュ
+
+プロンプトはプレフィックスキャッシュが効く組み方にしています。1リクエストの
+全質問は、質問文ブロックまで同じバイト列を送ります:
+
+```
+[system]    固定の指示文（状態は一切含まない）
+[user]      [画像…] + "STATE:\n" + <state のシリアライズ> + "\n\n" + <質問ブロック>
+[assistant] "<|im_start|></think>"   (JEVB_PREFILL_ASSISTANT)
+```
+
+state のシリアライズは1リクエストに1回だけ行い、ボディに id・タイムスタンプ・
+seed はなく、httpx は固定のキー順で JSON 化するので、同じ入力は同じバイト列に
+なります（`tests/test_api.py` が N 質問の共有プレフィックスを実際に検証）。ただし
+`serialize_state` は dict の state を `indent=2` かつ**ワイヤー上のキー順**で
+再シリアライズするので、同じ内容でもキー順を変えて送ったクライアントは別プレフィックス
+になります（＝キャッシュミス）。
+
+[性能](#性能) の Qwen3.8-Flash-Next エンドポイントで実測（出力1トークン）:
+
+| プロンプト | cold | warm |
+|---|---|---|
+| ~110 トークン（典型的なテンプレート） | 106 ms | 106 ms |
+| state ~1.4k トークン | 190 ms | 135 ms |
+| state ~2.8k トークン | 293 ms | — |
+
+キャッシュが効いていれば 2k トークンで +30 ms 程度とほぼ無料、cold の prefill は
+1k トークンごとに +40 ms ほど。注目すべきは fan-out の影響で、**同じ cold** の
+2.7k-token state に4つの別質問を投げると、**直列 665 ms / 並列 880 ms** でした。
+バックエンドは prefill を直列に処理するので、同時に投げると1問目が作ったはずの
+再利用を捨てることになります。
+
+どちらもオプトインのレバー:
+
+* `JEVB_MAX_CONCURRENCY=1` — 荒業。全質問が直列になり、前の問が温めた prefix を
+  次の問が当たります。長い state のバッチ処理向きで、温まった状態の処理量は落ちます。
+* `JEVB_PRIME_PREFIX=1` — ピンポイント。`JEVB_PRIME_MIN_STATE_CHARS` 以上の state の
+  ときだけ1問目を単独送信し、残りを出線。state は `JEVB_PRIME_TTL` 秒憶えるので
+  温まった state を二重に prime せず、発動時は `usage.prefix_primed` に出ます。
+
+こちらは正直に書いておきます: この構成（複数のワーカーの手前に LiteLLM ルーター）では、
+prime は 6問 cold リクエストで **+76 ms 遅く**なりました（1265 ms vs 1189 ms）。
+ブリッジはキャッシュのアフィニティキーを送らないため、prime したワーカーが
+そのまま残りの質問を受けるとは限らないからです。**単一ワーカー**の vLLM/SGLang
+レプリカでプレフィックスキャッシュを on にしている構成なら、上の直列/並列の差が
+そのまま効きます。
+
+ブリッジが**送っていないもの**: `prompt_cache_key`、セッション id、カスタム
+ヘッダー（ヘッダー設定は無く、固定値のボディフィールドなら `JEVB_BACKEND_EXTRA_BODY`
+で注入可）。OpenAI なら通常は問題になりません — プロンプトキャッシュは
+**1024 トークン以上**で自動的に働き（ヒットは `usage.prompt_tokens_details.cached_tokens`、
+5〜10 分の非活動で eviction）、jev-bridge の typical テンプレートは 110〜200
+トークンなので閾値を下回り、そもそもキャッシュされません。OpenAI が
+`prompt_cache_key` を推す理由は「同じプレフィックスの要求を同じキャッシュに寄せる」
+ことで、上のマルチワーカー問題そのものです。
 
 ## thinking モデル（Qwen3.x など）の扱い
 
@@ -278,7 +339,9 @@ gpt-4o         1問 ~597 ms  3問 ~617 ms     gpt-5.6-sol    1問 ~812 ms  3問 
   バックエンドが許すなら `JEVB_TOP_K` を上げてください
   （vLLM: `--max-logprobs`、SGLang: `top_logprobs_num`）。
 * レイテンシは質問数の影響をほぼ受けません。1リクエスト内の質問は並列実行され、
-  プレフィックスキャッシュにより state の prefill は1回だけです。
+  プレフィックスキャッシュで共有 state の prefill はほぼ無料になります。ただし
+  その state を叩く**最初**のリクエストだけは並列だと prefill を重複して払います
+  （実測値は「プロンプトキャッシュ」節）。
 
 ## Docker
 

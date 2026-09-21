@@ -22,9 +22,11 @@ client ──POST /v1/systemone──▶ jev-bridge ──POST /chat/completions
 Classification with an instruct LLM is usually done by prompting for JSON and
 praying. `jev-bridge` instead:
 
-1. Puts the **state in a shared system message** and each question in a user
-   turn, so all questions of one request share an identical prefix — backends
-   with prefix caching (SGLang radix cache, vLLM APC) prefill the state once.
+1. Puts the **state in the first user turn** (the system message is one fixed
+   string with no state in it) and each question in the same turn after the
+   state, so all questions of one request share an identical byte prefix —
+   backends with prefix caching (SGLang radix cache, vLLM APC) reuse the state
+   prefill. See [Prompt caching](#prompt-caching) for what is measured.
 2. Appends the answer options as single-token labels (`A`/`B`/`C…`, `true`/`false`,
    `0`/`1`/`2…`) and asks for exactly one label.
 3. Requests `max_tokens=1` with `logprobs` + `top_logprobs` and computes a
@@ -135,6 +137,9 @@ Question types (matching Jev's primitives):
 | `JEVB_PREFILL_ASSISTANT` | `1` | append `<think></think>` to suppress thinking-model preamble |
 | `JEVB_DISABLE_THINKING` | `1` | send `chat_template_kwargs: {enable_thinking: false, preserve_thinking: false}`; auto-retries without it if the backend rejects it |
 | `JEVB_BACKEND_EXTRA_BODY` | — | JSON merged into each chat-completions body, e.g. `{"chat_template_kwargs":{"enable_thinking":false}}`. Naming `max_completion_tokens` here also selects the field that carries the token budget |
+| `JEVB_PRIME_PREFIX` | `0` | send the first question alone so the shared prefix gets cached before the rest fan out (see [Prompt caching](#prompt-caching)) |
+| `JEVB_PRIME_MIN_STATE_CHARS` | `1200` | only prime when the serialized state is at least this long |
+| `JEVB_PRIME_TTL` | `300` | seconds to remember an already-primed state |
 | `JEVB_MODEL_NAME` | `jev-bridge-1` | reported model name when the request has no `model` |
 | `JEVB_ALLOW_LOCAL_IMAGES` | `0` | allow local file paths in `images` (off = data URI / URL / base64 only) |
 | `JEVB_MAX_IMAGE_BYTES` | `20971520` (20 MiB) | per-image size cap after decode |
@@ -149,6 +154,68 @@ confidence values observable in Jev's published examples (e.g. `{0.0, 0.7,
 
 **Confidence here is a distribution-shape statistic, not Jev's RLCD-calibrated
 confidence.** Treat thresholds as drift-prone and validate them on your task.
+
+## Prompt caching
+
+The prompt is laid out for prefix caching. Every question of a request sends the
+same bytes up to the question block:
+
+```
+[system]  fixed instruction text, no state
+[user]    [images…] + "STATE:\n" + <serialized state> + "\n\n" + <question block>
+[assistant] "<|im_start|></think>"   (JEVB_PREFILL_ASSISTANT)
+```
+
+The serialized state is produced once per request, there are no ids, timestamps
+or seeds in the body, and httpx serialises with a fixed key order — so the same
+input produces the same bytes, and `tests/test_api.py` asserts that the N
+per-question calls share one prefix. One consequence worth knowing:
+`serialize_state` re-dumps a dict state with `indent=2` and **wire key order**,
+so a client that sends the same state with reordered keys gets a different
+prefix (and a different prompt).
+
+Measured on the Qwen3.8-Flash-Next endpoint described in
+[Performance](#performance), one token out:
+
+| prompt | cold | warm |
+|---|---|---|
+| ~110 tokens (typical template) | 106 ms | 106 ms |
+| ~1.4k tokens of state | 190 ms | 135 ms |
+| ~2.8k tokens of state | 293 ms | — |
+
+So a cached prefix is close to free (~+30 ms for 2k tokens) while a cold prefill
+costs roughly +40 ms per extra 1k tokens. The interesting part is what fan-out
+does to that: four different questions over the *same cold* 2.7k-token prefix
+took **665 ms sequential** and **880 ms concurrent**. The backend serialises
+prefill work anyway, so sending them all at once forfeits the reuse the first
+question would have created.
+
+Two levers, both opt-in:
+
+* `JEVB_MAX_CONCURRENCY=1` — blunt: every question sequential, so each one hits
+  the prefix the previous one warmed. Good for long-state batch jobs, bad for
+  warm throughput.
+* `JEVB_PRIME_PREFIX=1` — surgical: for states of at least
+  `JEVB_PRIME_MIN_STATE_CHARS` characters, the first question goes out alone and
+  the rest fan out. Tracked per state for `JEVB_PRIME_TTL` seconds, so a warm
+  state is never primed twice, and `usage.prefix_primed` reports when it happens.
+
+Be honest about the second one: on this deployment (a LiteLLM router in front of
+several workers) priming measured **+76 ms slower** for a 6-question cold request
+(1265 ms vs 1189 ms), because the bridge sends no cache-affinity key and the
+primed worker is not necessarily the one that serves the rest. It earns its keep
+on a **single-worker** vLLM/SGLang replica with prefix caching on, where the
+sequential/concurrent gap above is the whole story.
+
+What the bridge does **not** send: `prompt_cache_key`, a session id, or any
+custom header (there is no header configuration; a constant body field can be
+injected with `JEVB_BACKEND_EXTRA_BODY`). With OpenAI that is usually moot —
+prompt caching is automatic for prompts of **1024 tokens or more**
+(`usage.prompt_tokens_details.cached_tokens` reports the hit, eviction after ~5–10
+min idle), and a typical jev-bridge template is ~110–200 tokens, i.e. below the
+threshold and never cached. OpenAI's own guidance to set `prompt_cache_key` is
+about routing requests with a shared prefix to the same cache, which is exactly
+the multi-worker problem above.
 
 ## Thinking models (Qwen3.x, …)
 
@@ -420,8 +487,9 @@ lands, not about the model being unable to express doubt.
   top-K receive a floor probability. Raise `JEVB_TOP_K` where the backend
   allows it (vLLM: `--max-logprobs`, SGLang: `top_logprobs_num`).
 * Latency scales with question count only through backend batching: all
-  questions of one request run concurrently; with prefix caching the state is
-  prefilled once.
+  questions of one request run concurrently, and prefix caching makes the shared
+  state nearly free — except on the *first* request for a state, where fan-out
+  pays the prefill more than once (measured below).
 
 ## Development
 
