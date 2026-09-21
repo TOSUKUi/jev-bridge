@@ -521,6 +521,59 @@ goes. These figures replace an earlier 111 / 201 / 366 ms set taken on another
 day; treat single-digit percentages as day-to-day noise and re-measure on your own
 hardware.
 
+### Reproducibility
+
+At `temperature: 0` the endpoint is **not bit-reproducible** on this machine. The
+same request body, twelve times in a row:
+
+| questions per request | p(the top option) over 12 runs | peak-to-peak |
+|---|---|---|
+| 1 | 0.667 … 0.738 | 0.071 |
+| 6 | 0.6985 every time | 0.000 |
+
+Greedy decoding fixes the *sampling*, not the arithmetic: continuous batching
+changes the batch a sequence is folded into, and reduction order moves logits by
+just enough to matter near a tie. Do not treat the fourth decimal as a
+measurement, and give thresholds real margins. (The narrow reading of the table:
+under this shared load, a six-question request came back identical across twelve
+runs while a single-question one drifted. It is not evidence that concurrency
+improves determinism, and the 6-question row is six independent calls sharing a
+prefix — not one joint prompt.)
+
+### What is left on the table
+
+Four measured dead ends, so you don't spend a week on them:
+
+* **Per-question cost.** ~47 ms per extra question when fired back to back, ~63 ms
+  when fired with 3 s gaps between requests — i.e. leaving it idle makes the slope
+  *worse*, so this is not burst queueing. Attribution is unmeasured (no per-request
+  scheduler or GPU instrumentation from the client side).
+* **Compact state.** `json.dumps(..., separators=(",", ":"))` instead of `indent=2`
+  cuts the prompt 2789 → 1707 tokens/call (-39%) and cold latency 965 → 839 ms
+  (paired, `/flush_cache` before every shot). It did **not** win warm (one run said
+  +3 ms, another -58 ms) and it moved probabilities by up to **0.27** and confidence
+  by **0.41** on the same six questions with zero argmax changes. Whitespace is
+  model input: pass a pre-serialized compact string if you want the tokens, but
+  re-run your own scoring regression first.
+* **`logit_bias`.** Honoured, direct and through the gateway alike, with the same
+  returned bytes (`/tokenize {"prompt": "B"}` → id 33 on this tokenizer; `true`/`false`
+  are single tokens 1802/3721). But the returned logprobs are conditioned on *not
+  being a banned token*, renormalised over the rest of the vocabulary — not over
+  your label set — so it can suppress an option, it cannot hand you measured
+  probabilities for a set of labels. It does not replace the floor heuristic.
+* **`top_logprobs` beyond 20.** This backend accepts 32/64/100 (their API is not
+  capped like OpenAI's), yet across 3-option and 10-option probes every label was
+  already inside the top 20, so the floor never fired and raising K moved
+  probabilities by <= 0.11 — inside the run-to-run wobble above. Leave `JEVB_TOP_K`
+  alone unless your labels genuinely fall outside the top 20.
+
+Fan-in — every question in one prompt, read the label at each position — is the one
+measured win (6 questions 137 ms vs 337 ms in the same run), and it is not offered: it scores
+`P(label_i | state, all questions, earlier answers)` instead of
+`P(label_i | state, question_i)`, which flipped the argmax on 2 of 6 questions and
+moved a probability by as much as 0.55. A decision engine whose product is a probability
+does not get to redefine it for a latency number.
+
 The questions of one request are issued concurrently (`JEVB_MAX_CONCURRENCY`,
 default 8), and *N questions at once* is a different quantity from *N questions in
 a row*. Four simultaneous 3-question requests against the same warm endpoint:
