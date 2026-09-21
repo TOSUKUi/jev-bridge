@@ -136,7 +136,7 @@ curl -s http://127.0.0.1:8900/v1/systemone -H 'Content-Type: application/json' -
 | `JEVB_CONFIDENCE_METHOD` | `linear` | `linear` \| `max_prob` \| `entropy` |
 | `JEVB_PREFILL_ASSISTANT` | `1` | `<think></think>` プレフィルを assistant メッセージに付与 |
 | `JEVB_DISABLE_THINKING` | `1` | `chat_template_kwargs: {enable_thinking: false, preserve_thinking: false}` を送る。バックエンドに拒否されたら自動で外して再試行 |
-| `JEVB_BACKEND_EXTRA_BODY` | — | 毎回の chat-completions ボディにマージする JSON。例 `{"chat_template_kwargs":{"enable_thinking":false}}` |
+| `JEVB_BACKEND_EXTRA_BODY` | — | 毎回の chat-completions ボディにマージする JSON。例 `{"chat_template_kwargs":{"enable_thinking":false}}`。ここに `max_completion_tokens` を指定すると、トークン予算を入れるフィールド名もこれに切り替わる |
 | `JEVB_MODEL_NAME` | `jev-bridge-1` | リクエストに `model` がない場合に報告するモデル名 |
 | `JEVB_HOST` / `JEVB_PORT` | `0.0.0.0` / `8900` | `jev-bridge serve` の待ち受けアドレス |
 
@@ -241,6 +241,23 @@ HTTP サーバ経由・ウォーム状態で実測:
 比較として、TypeSafe はホスト版 Jev で 70〜500 ms と公表しており、
 コミュニティ計測では3問バッチで約212 ms という値もあります。
 
+同じブリッジで **公式 OpenAI API** を叩いた値（`JEVB_DISABLE_THINKING=0`、
+`JEVB_PREFILL_ASSISTANT=0`、ウォーム状態6回の中央値、ネットワーク込み）:
+
+```
+gpt-4.1-mini   1問 ~415 ms  3問 ~560 ms     gpt-5.6-luna   1問 ~608 ms  3問 ~629 ms
+gpt-4.1-nano   1問 ~438 ms  3問 ~523 ms     gpt-5.4-mini   1問 ~662 ms  3問 ~729 ms
+gpt-4o-mini    1問 ~583 ms  3問 ~570 ms     gpt-5.6-terra  1問 ~813 ms  3問 ~926 ms
+gpt-4o         1問 ~597 ms  3問 ~617 ms     gpt-5.6-sol    1問 ~812 ms  3問 ~1077 ms
+```
+
+5.x 系は「使える OpenAI モデル」節の設定例が必要です。ホスト型 API で変わる点は
+2つ。レイテンシは往復に支配される（この環境で ~0.4 s。上のローカル数値が目標）。
+そして `temperature: 0` では曖昧でない入力が one-hot
+（`{billing: 1.0, shipping: 0.0, returns: 0.0}`）で返ることが多く、閾値が動く
+余地が残らない。本当に曖昧な入力では勾配は残る（`0.85 / 0.15 / 0.0`）ので、
+「モデルが迷えない」のではなく動作点が端に寄る、という話。
+
 ## 既知の差異（Jev 本体との違い）
 
 * 回答は LLM の1フォワードパスから得たもので、RLCD 学習はありません。品質はバックエンド
@@ -289,6 +306,53 @@ docker run --rm -p 8900:8900 \
   -e JEVB_PREFILL_ASSISTANT=0 \
   jev-bridge
 ```
+
+#### 使える OpenAI モデル
+
+スコアリングは **最初のサンプルトークンの logprobs** があれば成り立つので、
+モデルが `logprobs` を受けつけて、複数の候補を返してくれる必要がある。Chat
+Completions API で実測した結果:
+
+| モデル | 判定 |
+|---|---|
+| `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano` | そのまま使える。`top_logprobs` は 20 まで反映 |
+| `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol` | 下の設定例で使える（reasoning 系） |
+| `o4-mini`, `gpt-5-nano` | 使用不可: `You are not allowed to request logprobs from this model` |
+
+GPT-5.x の reasoning 系は3つの制約がある。いずれもブリッジの設定ではなく
+モデル側のポリシー。
+
+```bash
+export JEVB_BACKEND_EXTRA_BODY='{"reasoning_effort":"none","max_completion_tokens":8}'
+export JEVB_TOP_K=5
+```
+
+* reasoning がオンのあいだ `logprobs` は一切拒否される
+  （`Unsupported parameter: 'logprobs' is not supported with this model`）。
+  `reasoning_effort: "none"` で解除できるが、**レベル指定では無理**
+  （`low` はそのまま拒否）。
+* `max_tokens` が拒否され `max_completion_tokens` を求められる。上の例のように
+  `JEVB_BACKEND_EXTRA_BODY` に書いておけば最初の一発目で通る（実行時まで
+  分からないサーバには自動リトライで追従する）。予算 1 トークンは
+  `Could not finish the message` で不可、4 以上なら可。
+* `top_logprobs` は **5** まで。`JEVB_TOP_K=5`、つまり選択肢は5個まで。
+
+**注意: 候補リストは切り詰められて返る。** OpenAI は確率質量のあるトークンしか
+返さず、確信の高い回答は候補1件（`{"A": -0.0}`）で来るため、他のラベルは
+ブリッジの下限値に落ちる。結果はどの方向に傾いても
+`{"billing": 0.9993, "shipping": 0.0003, "returns": 0.0003}` という見た目になる
+（同じ曖昧な入力で `gpt-4o-mini` なら
+`{"billing": 0.148, "shipping": 0.0, "returns": 0.852}`）。1件しか返らないのは
+「候補を1つしか返さない仕様」ではなく切り詰め（コイントスをさせたプロンプトでは
+候補2件・`-0.34 / -1.25` と実差が返る）だが、結論は変わらない: 5.x 系では
+**argmax（一番高い選択肢）は信じられる**が、`probabilities`・`confidence`・
+閾値・`default_when` は計測値ではなく端数として出る。
+
+**Responses API に乗り換えても得をしない。** 拒否はエンドポイントではなくモデル
+側のポリシーで、そちらでも同じメッセージ
+（`logprobs are not supported with reasoning models`）が返る。ブリッジは
+`chat/completions` を使う。llama.cpp / vLLM / SGLang と同じ窓口であることも同じ
+理由。
 
 ### llama.cpp（`llama-server`）の場合
 

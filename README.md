@@ -134,7 +134,7 @@ Question types (matching Jev's primitives):
 | `JEVB_CONFIDENCE_METHOD` | `linear` | `linear` \| `max_prob` \| `entropy` |
 | `JEVB_PREFILL_ASSISTANT` | `1` | append `<think></think>` to suppress thinking-model preamble |
 | `JEVB_DISABLE_THINKING` | `1` | send `chat_template_kwargs: {enable_thinking: false, preserve_thinking: false}`; auto-retries without it if the backend rejects it |
-| `JEVB_BACKEND_EXTRA_BODY` | — | JSON merged into each chat-completions body, e.g. `{"chat_template_kwargs":{"enable_thinking":false}}` |
+| `JEVB_BACKEND_EXTRA_BODY` | — | JSON merged into each chat-completions body, e.g. `{"chat_template_kwargs":{"enable_thinking":false}}`. Naming `max_completion_tokens` here also selects the field that carries the token budget |
 | `JEVB_MODEL_NAME` | `jev-bridge-1` | reported model name when the request has no `model` |
 | `JEVB_ALLOW_LOCAL_IMAGES` | `0` | allow local file paths in `images` (off = data URI / URL / base64 only) |
 | `JEVB_MAX_IMAGE_BYTES` | `20971520` (20 MiB) | per-image size cap after decode |
@@ -234,6 +234,50 @@ docker run --rm -p 8900:8900 \
   -e JEVB_PREFILL_ASSISTANT=0 \
   jev-bridge
 ```
+
+#### Which OpenAI models work
+
+Scoring needs the **first sampled token's logprobs**, and it needs more than one
+candidate to compare. Measured against the Chat Completions API:
+
+| models | verdict |
+|---|---|
+| `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano` | work as shipped; `top_logprobs` honoured up to 20 |
+| `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol` | work with the recipe below (reasoning family) |
+| `o4-mini`, `gpt-5-nano` | unusable: `You are not allowed to request logprobs from this model` |
+
+The GPT-5.x reasoning models need three things that are model policy, not bridge
+settings:
+
+```bash
+export JEVB_BACKEND_EXTRA_BODY='{"reasoning_effort":"none","max_completion_tokens":8}'
+export JEVB_TOP_K=5
+```
+
+* `logprobs` is refused on a reasoning model until reasoning is off:
+  `Unsupported parameter: 'logprobs' is not supported with this model`.
+  `reasoning_effort: "none"` unlocks it; a *level* does not (`low` still refuses).
+* `max_tokens` is rejected in favour of `max_completion_tokens` — naming the
+  latter in `JEVB_BACKEND_EXTRA_BODY` makes the first request valid (a backend that
+  only tells you at runtime is handled by an automatic retry). A budget of 1 token
+  is refused outright (`Could not finish the message`); 4 or more works.
+* `top_logprobs` is capped at **5**, so keep `JEVB_TOP_K=5` — that is 5 options max.
+
+**The catch: the candidate list comes back truncated.** OpenAI returns only the
+tokens carrying real probability mass, so a confident answer arrives as a single
+entry (`{"A": -0.0}`) and every other label falls to the bridge's floor value:
+`{"billing": 0.9993, "shipping": 0.0003, "returns": 0.0003}` — the same numbers
+however the model leaned. `gpt-4o-mini` on the same ambiguous state returns
+`{"billing": 0.148, "shipping": 0.0, "returns": 0.852}`. It is truncation, not a
+one-token policy (a coin-flip prompt returns two entries, `-0.34 / -1.25`), but
+the consequence stands: on the 5.x models the **argmax** is trustworthy while
+`probabilities`, `confidence`, thresholds and `default_when` are endpoints rather
+than measurements.
+
+Switching to the **Responses API** buys nothing here: the refusal is a model
+policy and reads the same there (`logprobs are not supported with reasoning
+models`). The bridge speaks `chat/completions`, which is also what llama.cpp,
+vLLM and SGLang speak.
 
 ### llama.cpp (`llama-server`)
 
@@ -338,6 +382,24 @@ concurrently, so three questions cost far less than 3x one question.)
 Reproduce with `python examples/bench.py http://127.0.0.1:8900`. For
 comparison, TypeSafe reports 70–500 ms for hosted Jev and a community
 measurement found 3 batched questions at ~212 ms.
+
+Same bridge against the **official OpenAI API** (`JEVB_DISABLE_THINKING=0`,
+`JEVB_PREFILL_ASSISTANT=0`, median of 6 warm runs, network included):
+
+```
+gpt-4.1-mini   1q ~415 ms  3q ~560 ms     gpt-5.6-luna   1q ~608 ms  3q ~629 ms
+gpt-4.1-nano   1q ~438 ms  3q ~523 ms     gpt-5.4-mini   1q ~662 ms  3q ~729 ms
+gpt-4o-mini    1q ~583 ms  3q ~570 ms     gpt-5.6-terra  1q ~813 ms  3q ~926 ms
+gpt-4o         1q ~597 ms  3q ~617 ms     gpt-5.6-sol    1q ~812 ms  3q ~1077 ms
+```
+
+The 5.x numbers need the [model recipe](#which-openai-models-work). Two things a
+hosted API changes: latency is dominated by the round trip (~0.4 s here, so the
+local numbers above are the ones to beat), and at `temperature: 0` an
+unambiguous state comes back one-hot (`{billing: 1.0, shipping: 0.0, returns:
+0.0}`), which leaves a threshold nothing to act on. Genuinely ambiguous states do
+stay graded (`0.85 / 0.15 / 0.0`), so this is about where the operating point
+lands, not about the model being unable to express doubt.
 
 ## Known differences from Jev
 
