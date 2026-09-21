@@ -369,9 +369,9 @@ Notes:
 ## Performance
 
 Measured end to end, warm, on a single **RTX PRO 6000** running
-**Qwen3.8-Flash-Next** on an OpenAI-compatible endpoint (vLLM/SGLang served, a
-LiteLLM gateway in front, `chat_template_kwargs` honoured so thinking is off),
-median of 20 runs through the bridge:
+**Qwen3.8-Flash-Next** behind an OpenAI-compatible endpoint (a LiteLLM gateway in
+front of the model server; `chat_template_kwargs` is honoured there, so thinking
+is off), median of 20 runs through the bridge:
 
 ```
 1 question  (noul)               111 ms   (p10 105 / p90 138)
@@ -384,9 +384,9 @@ median of 20 runs through the bridge:
 
 The questions of one request are issued concurrently (`JEVB_MAX_CONCURRENCY`,
 default 8), and what is left of that growth belongs to the backend rather than to
-the bridge: the same endpoint answers a lone first-token call in 106 ms serially
-and tops out around 16–22 calls/s under concurrency (3 in flight → 191 ms wall,
-12 → 548 ms). Bridge overhead sits inside the noise of that 111 ms.
+the bridge: the same endpoint called directly answers a lone first-token request
+in 107 ms serially and tops out around 15–21 calls/s under concurrency (3 in
+flight → 199 ms wall, 12 → 563 ms) — so the bridge itself costs about 4 ms.
 
 Reproduce with `python examples/bench.py http://127.0.0.1:8900 20`. For
 comparison, TypeSafe reports 70–500 ms for hosted Jev and a community

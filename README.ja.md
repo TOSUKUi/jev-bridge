@@ -230,8 +230,8 @@ Jev 本体はテキスト専用のため、`images` は jev-bridge の拡張で�
 ## 性能
 
 **RTX PRO 6000 1枚** で **Qwen3.8-Flash-Next** を OpenAI 互換エンドポイント経由
-（vLLM/SGLang 配信の手前に LiteLLM、`chat_template_kwargs` が効くので thinking は
-オフ）、ブリッジ経由・ウォーム状態で20回の中央値:
+（配得手前に LiteLLM。`chat_template_kwargs` が効くので thinking はオフ）、
+ブリッジ経由・ウォーム状態で20回の中央値:
 
 ```
 1問  (noul)                111 ms   (p10 105 / p90 138)
@@ -244,9 +244,8 @@ Jev 本体はテキスト専用のため、`images` は jev-bridge の拡張で�
 
 1リクエスト内の各質問は並列で発行します（`JEVB_MAX_CONCURRENCY`、既定8）。
 上に残る差はブリッジではなくバックエンドのもので、同じエンドポイントを
-シリアルに叩くと単一の first-token 呼び出しは 106 ms、同時発行すると
-16〜22 件/s 付近で頭打ちです（同時3 → 191 ms、12 → 548 ms）。ブリッジ自身の
-オーバーヘッドは 111 ms の誤差範囲の中です。
+直接叩くと単一の first-token 呼び出しは 107 ms、同時発行では 15〜21 件/s 付近で
+頭打ちです（同時3 → 199 ms、12 → 563 ms）。ブリッジ自身のコストは 4 ms 程度。
 
 再現: `python examples/bench.py http://127.0.0.1:8900 20`。
 比較として、TypeSafe はホスト版 Jev で 70〜500 ms と公表しており、
