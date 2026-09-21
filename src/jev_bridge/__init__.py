@@ -21,10 +21,9 @@ a short follow-up message appended after a shared prefix; the backend's first
 next-token distribution over the answer labels (A/B/C... / true/false /
 level indices) is read via the OpenAI-compatible `logprobs` field and
 normalized. Servers with prefix caching (SGLang radix cache, vLLM automatic
-prefix caching) reuse that shared prefill, so a warm state costs about what a
-short prompt does; the first request for a state still pays it, and concurrent
-questions pay it once each unless the first goes out alone (`JEVB_PRIME_PREFIX`)
-or concurrency is pinned to 1.
+prefix caching) reuse that shared prefill once it is warm — the first request for
+a state still pays it, and questions fanned out before it is warm pay it more
+than once.
 """
 
 __version__ = "0.1.0"

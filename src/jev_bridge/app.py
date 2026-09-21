@@ -38,7 +38,7 @@ from fastapi.responses import JSONResponse
 from . import __version__
 from .backend import OpenAICompatClient
 from .schemas import JevBridgeError, SystemOneRequest
-from .scorer import PrimedStates, QuestionScorer, score_all
+from .scorer import QuestionScorer, score_all
 
 MODEL_NAME = os.environ.get("JEVB_MODEL_NAME", "jev-bridge-1")
 
@@ -79,11 +79,7 @@ def build_state() -> Dict[str, Any]:
         top_k=int(os.environ.get("JEVB_TOP_K", "20")),
         confidence_method=os.environ.get("JEVB_CONFIDENCE_METHOD", "linear"),
     )
-    return {
-        "client": client,
-        "scorer": scorer,
-        "primed": PrimedStates(ttl=float(os.environ.get("JEVB_PRIME_TTL", "300"))),
-    }
+    return {"client": client, "scorer": scorer}
 
 
 @asynccontextmanager
@@ -114,7 +110,6 @@ async def health() -> Dict[str, Any]:
         "prefill_assistant": _bool_env("JEVB_PREFILL_ASSISTANT", True),
         "disable_thinking": _bool_env("JEVB_DISABLE_THINKING", True),
         "confidence_method": os.environ.get("JEVB_CONFIDENCE_METHOD", "linear"),
-        "prime_prefix": _bool_env("JEVB_PRIME_PREFIX", False),
     }
 
 
@@ -132,9 +127,6 @@ async def systemone(request: Request) -> JSONResponse:
         parsed,
         max_concurrency=int(os.environ.get("JEVB_MAX_CONCURRENCY", "8")),
         allow_local_images=_bool_env("JEVB_ALLOW_LOCAL_IMAGES", False),
-        prime_prefix=_bool_env("JEVB_PRIME_PREFIX", False),
-        prime_min_state_chars=int(os.environ.get("JEVB_PRIME_MIN_STATE_CHARS", "1200")),
-        primed=request.app.state.bridge.get("primed"),
     )
     usage["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
     return JSONResponse(
