@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from typing import Any, Dict, List, Tuple
 
 from fastapi.testclient import TestClient
 
 import jev_bridge.app as app_module
-from jev_bridge.scorer import QuestionScorer
+from jev_bridge.scorer import PrimedStates, QuestionScorer
 
 # A plausible first-token distribution covering letters, booleans and digits.
 FAKE_TOP: List[Tuple[str, float]] = [
@@ -26,23 +27,34 @@ FAKE_TOP: List[Tuple[str, float]] = [
 class FakeClient:
     def __init__(self) -> None:
         self.calls: List[List[Dict[str, str]]] = []
+        self.inflight = 0
+        self.max_inflight = 0
 
     async def first_token_logprobs(
         self, messages: List[Dict[str, str]], top_logprobs: int
     ) -> Tuple[str, List[Tuple[str, float]], Dict[str, Any]]:
         self.calls.append(messages)
+        # hold the call open long enough that concurrent callers overlap
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            await asyncio.sleep(0.02)
+        finally:
+            self.inflight -= 1
         return "A", list(FAKE_TOP), {"prompt_tokens": 10, "completion_tokens": 1}
 
     async def aclose(self) -> None:
         return None
 
 
-def _client_with_fake_backend() -> Tuple[TestClient, FakeClient]:
+def _client_with_fake_backend(
+    *, primed: PrimedStates | None = None
+) -> Tuple[TestClient, FakeClient]:
     fake = FakeClient()
 
     def fake_build_state() -> Dict[str, Any]:
         scorer = QuestionScorer(fake, prefill_assistant=True, top_k=20)
-        return {"client": fake, "scorer": scorer}
+        return {"client": fake, "scorer": scorer, "primed": primed or PrimedStates(300)}
 
     app_module.build_state = fake_build_state  # type: ignore[assignment]
     return TestClient(app_module.app), fake
@@ -214,3 +226,53 @@ def test_health():
         resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+
+
+# --- prefix priming (JEVB_PRIME_PREFIX) -------------------------------------
+
+LONG_BODY = {**BODY, "state": "charged twice for order A-104; " * 80}  # > 1200 chars
+SHORT_BODY = BODY
+
+
+def test_prime_prefix_sends_the_first_question_alone(monkeypatch):
+    monkeypatch.setenv("JEVB_PRIME_PREFIX", "1")
+    client, fake = _client_with_fake_backend()
+    with client:
+        resp = client.post("/v1/systemone", json=LONG_BODY)
+    assert resp.status_code == 200, resp.text
+    assert len(fake.calls) == 3
+    # one question goes out solo, the other two fan out afterwards against the
+    # warmed prefix -> the peak overlap is 2, not 3
+    assert fake.max_inflight == 2
+    assert resp.json()["usage"]["prefix_primed"] == 1
+
+
+def test_prime_prefix_leaves_short_states_fully_concurrent(monkeypatch):
+    monkeypatch.setenv("JEVB_PRIME_PREFIX", "1")
+    client, fake = _client_with_fake_backend()
+    with client:
+        resp = client.post("/v1/systemone", json=SHORT_BODY)
+    assert len(fake.calls) == 3
+    assert fake.max_inflight == 3  # unchanged behaviour: no round trip wasted
+    assert "prefix_primed" not in resp.json()["usage"]
+
+
+def test_prime_prefix_is_paid_once_per_state(monkeypatch):
+    monkeypatch.setenv("JEVB_PRIME_PREFIX", "1")
+    primed = PrimedStates(300)
+    client, fake = _client_with_fake_backend(primed=primed)
+    with client:
+        first = client.post("/v1/systemone", json=LONG_BODY).json()
+        second = client.post("/v1/systemone", json=LONG_BODY).json()
+    assert first["usage"].get("prefix_primed") == 1
+    # the state is now known-warm: the second request fans out immediately
+    assert "prefix_primed" not in second["usage"]
+    assert fake.max_inflight == 3
+
+
+def test_prime_prefix_off_by_default():
+    client, fake = _client_with_fake_backend()
+    with client:
+        resp = client.post("/v1/systemone", json=LONG_BODY)
+    assert fake.max_inflight == 3
+    assert "prefix_primed" not in resp.json()["usage"]
