@@ -9,6 +9,12 @@ Thinking models: Qwen3-style chat templates only emit the empty
 through ``chat_template_kwargs``. The client sends that by default
 (``disable_thinking=True``) and transparently falls back to omitting the
 field on HTTP 400/422, so backends that do not understand it keep working.
+
+Token budget: the request asks for a single completion token (only the first
+sampled token is scored). ``max_tokens`` is sent by default; backends that
+renamed the field (OpenAI's GPT-5.x family) are handled by naming
+``max_completion_tokens`` in ``extra_body``, or by latching after the first
+rejection that asks for it.
 """
 
 from __future__ import annotations
@@ -43,6 +49,9 @@ class OpenAICompatClient:
             "enable_thinking": False,
             "preserve_thinking": False,
         }
+        # Some backends (OpenAI's GPT-5.x family) reject `max_tokens` outright and
+        # want `max_completion_tokens`; latched on the first such rejection.
+        self._max_tokens_key = "max_tokens"
         limits = httpx.Limits(max_connections=max_concurrency)
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -54,6 +63,20 @@ class OpenAICompatClient:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    def _budget_key(self) -> str:
+        """Which field carries the token budget on the wire.
+
+        ``max_tokens`` is the de-facto default, but OpenAI's GPT-5.x family rejects
+        it and accepts only ``max_completion_tokens``. A value named explicitly in
+        :attr:`extra_body` decides the field up front (so the *first* request is
+        already valid); otherwise the choice is latched after the first rejection
+        that names the other field.
+        """
+        for key in ("max_completion_tokens", "max_tokens"):
+            if key in self.extra_body:
+                return key
+        return self._max_tokens_key
 
     async def first_token_logprobs(
         self,
@@ -74,7 +97,7 @@ class OpenAICompatClient:
             "model": self.model,
             "messages": messages,
             "temperature": 0.0,
-            "max_tokens": max_completion_tokens,
+            self._budget_key(): max_completion_tokens,
             "logprobs": True,
             "top_logprobs": max(1, top_logprobs),
         }
@@ -86,6 +109,14 @@ class OpenAICompatClient:
         try:
             async with self._sem:
                 resp = await self._client.post("/chat/completions", json=body)
+            if resp.status_code in (400, 422) and "max_tokens" in body \
+                    and "max_completion_tokens" in resp.text:
+                # backend renamed the field: send the token budget the other way
+                self._max_tokens_key = "max_completion_tokens"
+                retry = {k: v for k, v in body.items() if k != "max_tokens"}
+                retry.setdefault(self._max_tokens_key, max_completion_tokens)
+                async with self._sem:
+                    resp = await self._client.post("/chat/completions", json=retry)
             if resp.status_code in (400, 422) and "chat_template_kwargs" in body:
                 # backend does not accept chat_template_kwargs: retry without it
                 self._disable_thinking = False

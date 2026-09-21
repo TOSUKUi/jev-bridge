@@ -103,6 +103,39 @@ def test_retries_without_chat_template_kwargs_on_400():
     assert "chat_template_kwargs" not in seen[2]
 
 
+def test_retries_with_max_completion_tokens_when_max_tokens_rejected():
+    """OpenAI's GPT-5.x family rejects `max_tokens`; the budget must go over the
+    other field name, and the choice must be remembered."""
+    seen: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        body = json.loads(request.content)
+        seen.append(body)
+        if "max_tokens" in body:
+            return httpx.Response(
+                400,
+                json={"error": {"message": "Unsupported parameter: 'max_tokens' is not "
+                       "supported with this model. Use 'max_completion_tokens' instead."}},
+            )
+        return httpx.Response(200, json=_ok_response())
+
+    client = _client_with_transport(handler)
+
+    async def run():
+        text, _, _ = await client.first_token_logprobs(MESSAGES, 5)
+        await client.first_token_logprobs(MESSAGES, 5)
+        await client.aclose()
+        return text
+
+    assert asyncio.run(run()) == "A"
+    assert len(seen) == 3
+    assert "max_tokens" in seen[0]
+    assert "max_tokens" not in seen[1] and seen[1]["max_completion_tokens"] == 1
+    assert "max_tokens" not in seen[2]
+
+
 def test_extra_body_kwargs_take_precedence():
     seen: List[Dict[str, Any]] = []
 
@@ -127,6 +160,43 @@ def test_extra_body_kwargs_take_precedence():
 
     asyncio.run(run())
     assert seen[0]["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_extra_body_budget_field_avoids_the_rejection_round_trip():
+    """Naming the budget field in extra_body must be enough on its own: the
+    rejected name should never go on the wire, not even once."""
+    seen: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        body = json.loads(request.content)
+        seen.append(body)
+        if "max_tokens" in body:
+            return httpx.Response(
+                400, json={"error": {"message": "Unsupported parameter: 'max_tokens'. "
+                              "Use 'max_completion_tokens' instead."}}
+            )
+        return httpx.Response(200, json=_ok_response())
+
+    client = OpenAICompatClient(
+        "http://example.invalid/v1",
+        model="m",
+        extra_body={"reasoning_effort": "none", "max_completion_tokens": 8},
+    )
+    client._client = httpx.AsyncClient(  # type: ignore[assignment]
+        base_url="http://example.invalid/v1", transport=httpx.MockTransport(handler)
+    )
+
+    async def run():
+        await client.first_token_logprobs(MESSAGES, 5)
+        await client.aclose()
+
+    asyncio.run(run())
+    assert len(seen) == 1
+    assert "max_tokens" not in seen[0]
+    assert seen[0]["max_completion_tokens"] == 8
+    assert seen[0]["reasoning_effort"] == "none"
 
 
 def test_missing_logprobs_raises_backend_error():
