@@ -1,25 +1,35 @@
-# Run jev-bridge in front of any OpenAI-compatible LLM server.
+# Run jev-bridge in front of an OpenAI-compatible LLM server.
 #
+#   export OPENAI_API_KEY=sk-...
 #   docker compose up
 #   curl http://127.0.0.1:8900/health
 #
-# Point JEVB_BACKEND_BASE_URL at your inference server (SGLang, vLLM,
-# llama.cpp, LMDeploy, ...). For a server on the host, use
-# host.docker.internal and add the extra_hosts entry below.
+# This file is the repo default: the official OpenAI API. Any other
+# OpenAI-compatible server (llama.cpp, vLLM, SGLang, LMDeploy, TGI, ...) is a
+# matter of pointing JEVB_BACKEND_BASE_URL + JEVB_BACKEND_MODEL at it — see the
+# three worked examples in the README's Docker section.
 services:
   jev-bridge:
-    image: ghcr.io/yourname/jev-bridge:latest
-    # or build from this repo (context is the repo root):
-    # build: .
+    build: .
+    image: jev-bridge:latest
+    # once you have a published image, drop build: and use it instead:
+    # image: ghcr.io/<yourname>/jev-bridge:latest
     environment:
-      JEVB_BACKEND_BASE_URL: http://host.docker.internal:4000/v1
-      JEVB_BACKEND_MODEL: nv-qwen-general
+      JEVB_BACKEND_BASE_URL: https://api.openai.com/v1
+      # must be a logprobs-capable model
+      JEVB_BACKEND_MODEL: gpt-4o-mini
+      # taken from the host env; a self-hosted server usually accepts any
+      # non-empty token here
+      JEVB_BACKEND_API_KEY: ${OPENAI_API_KEY:-}
       JEVB_MAX_CONCURRENCY: "8"
-      # Qwen3.x: empty think-block via the chat template (backend-native way)
-      # instead of the assistant prefill:
-      # JEVB_BACKEND_EXTRA_BODY: '{"chat_template_kwargs":{"enable_thinking":false}}'
-      # JEVB_PREFILL_ASSISTANT: "0"
+      # OpenAI understands neither chat_template_kwargs nor assistant prefill:
+      JEVB_DISABLE_THINKING: "0"
+      JEVB_PREFILL_ASSISTANT: "0"
+      # OpenAI caps top_logprobs at 20 — this is both the default and the max:
+      # JEVB_TOP_K: "20"
     ports:
       - "127.0.0.1:8900:8900"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    # Only needed when the backend runs on the host and is reached as
+    # host.docker.internal (llama.cpp / vLLM examples in the README):
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"

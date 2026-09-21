@@ -44,6 +44,10 @@ export JEVB_BACKEND_MODEL="qwen3.8-flash-next"
 jev-bridge serve --host 0.0.0.0 --port 8900
 ```
 
+No server of your own? Point it at the official OpenAI API instead (add
+`JEVB_BACKEND_API_KEY`, `JEVB_DISABLE_THINKING=0`, `JEVB_PREFILL_ASSISTANT=0`) —
+[Docker](#docker) works through OpenAI / llama.cpp / vLLM.
+
 Ask a question:
 
 ```bash
@@ -165,24 +169,82 @@ precedence over the built-in defaults.
 
 ## Docker
 
-```yaml
-services:
-  jev-bridge:
-    image: ghcr.io/yourname/jev-bridge:latest   # or build: .
-    environment:
-      JEVB_BACKEND_BASE_URL: http://sglang:30010/v1
-      JEVB_BACKEND_MODEL: qwen3.8-flash-next
-    ports:
-      - "127.0.0.1:8900:8900"
-```
+`docker-compose.yml` at the repo root is the default deployment: the **official
+OpenAI API**.
 
 ```bash
-docker build -t jev-bridge .
+export OPENAI_API_KEY=sk-...
+docker compose up
+curl -s http://127.0.0.1:8900/health
+```
+
+The compose file builds the image from this checkout (`build: .` tagged
+`jev-bridge:latest`) — replace those two lines with a published image once you
+have one. Switching backend is only ever a matter of
+`JEVB_BACKEND_BASE_URL` + `JEVB_BACKEND_MODEL` (+ `JEVB_BACKEND_API_KEY` if the
+server checks a token) — by editing the compose file, dropping a
+`docker-compose.override.yml` next to it, or using the `docker run` form below.
+The three examples below are the same bridge and the same questions; what
+differs is what each backend wants to be told.
+
+### Official OpenAI
+
+This is exactly what the compose file ships. `chat_template_kwargs` is a
+vLLM/SGLang extension and the Chat API has no assistant prefill, so both
+thinking-suppression layers are switched off; the model must support `logprobs`,
+and `top_logprobs` is capped at **20** — which is already the `JEVB_TOP_K`
+default, so there is nothing to raise. Equivalent one-liner:
+
+```bash
 docker run --rm -p 8900:8900 \
-  -e JEVB_BACKEND_BASE_URL=http://host.docker.internal:30010/v1 \
-  -e JEVB_BACKEND_MODEL=qwen3.8-flash-next \
+  -e JEVB_BACKEND_BASE_URL=https://api.openai.com/v1 \
+  -e JEVB_BACKEND_MODEL=gpt-4o-mini \
+  -e JEVB_BACKEND_API_KEY="$OPENAI_API_KEY" \
+  -e JEVB_DISABLE_THINKING=0 \
+  -e JEVB_PREFILL_ASSISTANT=0 \
   jev-bridge
 ```
+
+### llama.cpp (`llama-server`)
+
+Nothing to configure. Current builds read `chat_template_kwargs` and map
+`enable_thinking` onto the chat template; older builds ignore the field, and the
+assistant prefill (on by default) covers those. `top_logprobs` is translated to
+llama.cpp's `n_probs` (default 20) with no OpenAI-style cap, but a large top-K
+per token costs bandwidth — raise `JEVB_TOP_K` only when a question really needs
+it. Give the server a slot per concurrent question (`--parallel` ≥
+`JEVB_MAX_CONCURRENCY`).
+
+```bash
+llama-server -m Qwen3-8B-Instruct-Q4_K_M.gguf -c 16384 --port 8080 --parallel 8
+
+docker run --rm -p 8900:8900 \
+  -e JEVB_BACKEND_BASE_URL=http://host.docker.internal:8080/v1 \
+  -e JEVB_BACKEND_MODEL=qwen3-8b-instruct \
+  --add-host=host.docker.internal:host-gateway \
+  jev-bridge
+```
+
+### vLLM
+
+`chat_template_kwargs` is understood, so thinking models are handled by the
+defaults. `--max-logprobs` caps `top_logprobs` (default **20**, the same as the
+bridge's `JEVB_TOP_K`) — raise it when you need more than 20 options, and keep
+prefix caching on so the shared state is prefilled once.
+
+```bash
+vllm serve Qwen/Qwen3-8B --max-logprobs 64 --enable-prefix-caching
+
+docker run --rm -p 8900:8900 \
+  -e JEVB_BACKEND_BASE_URL=http://host.docker.internal:8000/v1 \
+  -e JEVB_BACKEND_MODEL=Qwen/Qwen3-8B \
+  -e JEVB_TOP_K=64 \
+  --add-host=host.docker.internal:host-gateway \
+  jev-bridge
+```
+
+The same shape covers SGLang (`python -m sglang.launch_server --model …`) — that
+is the configuration the [Performance](#performance) numbers were measured on.
 
 ## CLI
 

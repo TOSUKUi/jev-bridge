@@ -43,6 +43,10 @@ export JEVB_BACKEND_MODEL="qwen3.8-flash-next"
 jev-bridge serve --host 0.0.0.0 --port 8900
 ```
 
+自分でサーバーを起動しないなら、公式 OpenAI API を向いてもよい（`JEVB_BACKEND_API_KEY` に加えて
+`JEVB_DISABLE_THINKING=0` と `JEVB_PREFILL_ASSISTANT=0` を追加）。
+バックエンド別の設定は [Docker](#docker) を参照。
+
 質問を投げる:
 
 ```bash
@@ -226,24 +230,81 @@ HTTP サーバ経由・ウォーム状態で実測:
 
 ## Docker
 
-```yaml
-services:
-  jev-bridge:
-    image: ghcr.io/yourname/jev-bridge:latest   # または build: .
-    environment:
-      JEVB_BACKEND_BASE_URL: http://sglang:30010/v1
-      JEVB_BACKEND_MODEL: qwen3.8-flash-next
-    ports:
-      - "127.0.0.1:8900:8900"
-```
+リポジトリ直下の `docker-compose.yml` が既定の構成で、**公式 OpenAI API** を向きます。
 
 ```bash
-docker build -t jev-bridge .
+export OPENAI_API_KEY=sk-...
+docker compose up
+curl -s http://127.0.0.1:8900/health
+```
+
+イメージは compose ファイルがリポジトリからビルドして `jev-bridge:latest` に
+タグ付けする（`docker build -t jev-bridge .` と同じ）。公開イメージがあれば
+`build:` と `image:` の2行を差し替えてください。バックエンドの切り替えは
+`JEVB_BACKEND_BASE_URL` と `JEVB_BACKEND_MODEL`（トークン検証をするサーバーなら
+`JEVB_BACKEND_API_KEY` を追加）だけで、compose ファイルを編集するか、同じ場所に
+`docker-compose.override.yml` を置くか、下記の `docker run` を使えばよい。
+以下の3例は同じブリッジ・同じ質問で、違いはバックエンド側に何を伝えておくか
+だけです。
+
+### 公式 OpenAI の場合
+
+docker-compose.yml がすでにこの内容です。`chat_template_kwargs` は
+vLLM/SGLang 拡張で、Chat API には assistant prefill がないので、thinking 抑止の
+2層はどちらもオフにします。モデルは `logprobs` 対応が必要。`top_logprobs` は
+**20** までで、既定の `JEVB_TOP_K` と同じ値（上げても増えては返りません）。
+同じ内容の1コマンド版:
+
+```bash
 docker run --rm -p 8900:8900 \
-  -e JEVB_BACKEND_BASE_URL=http://host.docker.internal:30010/v1 \
-  -e JEVB_BACKEND_MODEL=qwen3.8-flash-next \
+  -e JEVB_BACKEND_BASE_URL=https://api.openai.com/v1 \
+  -e JEVB_BACKEND_MODEL=gpt-4o-mini \
+  -e JEVB_BACKEND_API_KEY="$OPENAI_API_KEY" \
+  -e JEVB_DISABLE_THINKING=0 \
+  -e JEVB_PREFILL_ASSISTANT=0 \
   jev-bridge
 ```
+
+### llama.cpp（`llama-server`）の場合
+
+ブリッジ側の設定は不要。現行ビルドなら `chat_template_kwargs` が読まれて
+`enable_thinking` がチャットテンプレートに渡され、古いビルドで無視されても
+assistant prefill（既定 on）が効きます。`top_logprobs` は llama.cpp の `n_probs`
+（既定 20）に変換され、OpenAI のような上限はありませんが、1トークンあたりの
+top-K を大きくすると転送量が増えるので、本当に必要なときだけ `JEVB_TOP_K` を
+上げてください。質問は並列で飛ぶので、サーバー側のスロット（`--parallel`）は
+`JEVB_MAX_CONCURRENCY` 以上を確保します。
+
+```bash
+llama-server -m Qwen3-8B-Instruct-Q4_K_M.gguf -c 16384 --port 8080 --parallel 8
+
+docker run --rm -p 8900:8900 \
+  -e JEVB_BACKEND_BASE_URL=http://host.docker.internal:8080/v1 \
+  -e JEVB_BACKEND_MODEL=qwen3-8b-instruct \
+  --add-host=host.docker.internal:host-gateway \
+  jev-bridge
+```
+
+### vLLM の場合
+
+`chat_template_kwargs` が通るので、thinking モデルは既定値のまま処理できます。
+`top_logprobs` の上限はサーバーの `--max-logprobs`（既定 **20**、ブリッジの
+`JEVB_TOP_K` と同じ）で、20個以上の選択肢が要るなら両方を上げます。プレフィックス
+キャッシュは on のままにすると共有 prefix の prefill が1回になります。
+
+```bash
+vllm serve Qwen/Qwen3-8B --max-logprobs 64 --enable-prefix-caching
+
+docker run --rm -p 8900:8900 \
+  -e JEVB_BACKEND_BASE_URL=http://host.docker.internal:8000/v1 \
+  -e JEVB_BACKEND_MODEL=Qwen/Qwen3-8B \
+  -e JEVB_TOP_K=64 \
+  --add-host=host.docker.internal:host-gateway \
+  jev-bridge
+```
+
+SGLang（`python -m sglang.launch_server --model …`）も同じ形です。なお
+[性能](#性能) の実測値は SGLang 構成でのものです。
 
 ## CLI
 
