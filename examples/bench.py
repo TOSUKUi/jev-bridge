@@ -88,13 +88,18 @@ def summarize(name: str, samples: list[float]) -> None:
     )
 
 
-def burst(client: httpx.Client, base: str, body: dict, n: int) -> tuple[float, float]:
-    """Fire ``n`` identical requests at once; return (ms per request, wall ms)."""
+def burst(client: httpx.Client, base: str, body: dict, n: int) -> tuple[list[float], float]:
+    """Fire ``n`` identical requests at once; return (per-request ms, wall ms).
+
+    The per-request list is what each caller actually waited for. wall/N is a
+    different quantity (throughput expressed as time), so it is printed next to
+    the latencies rather than instead of them.
+    """
     with ThreadPoolExecutor(max_workers=n) as pool:
         t0 = time.perf_counter()
-        list(pool.map(lambda _: run_once(client, base, body), range(n)))
+        samples = list(pool.map(lambda _: run_once(client, base, body), range(n)))
         wall = (time.perf_counter() - t0) * 1000.0
-    return wall / n, wall
+    return samples, wall
 
 
 def main() -> int:
@@ -116,8 +121,12 @@ def main() -> int:
     print(f"jev-bridge benchmark @ {base}  ({runs} runs each)")
     for name, _ in BODIES:
         summarize(name, samples[name])
-    for n, (per_req, wall) in bursts.items():
-        print(f"{n}x 3q at once  median {per_req:7.1f} ms/request   (wall {wall:.0f} ms for {n})")
+    for n, (samples, wall) in bursts.items():
+        ordered = sorted(samples)
+        print(
+            f"{n}x 3q at once      wall {wall:6.0f} ms   per-request p50 {statistics.median(ordered):5.0f}"
+            f"   slowest {ordered[-1]:.0f}   amortised {wall / n:.0f}"
+        )
     print("answers:", json.dumps(sample["answers"], ensure_ascii=False))
     return 0
 

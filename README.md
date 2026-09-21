@@ -504,25 +504,42 @@ Notes:
 
 ## Performance
 
-Measured end to end, warm, on a single **RTX PRO 6000** running
-**Qwen3.8-Flash-Next** behind an OpenAI-compatible endpoint (a LiteLLM gateway in
-front of an SGLang server; `chat_template_kwargs` is honoured there, so thinking
-is off), median of 20 runs through the bridge:
+Measured end to end, warm, on a single **RTX PRO 6000** serving
+**Qwen3.8-Flash-Next** with **SGLang**, through the bridge, 10 runs each:
 
 ```
-1 question  (noul)               111 ms   (p10 105 / p90 138)
-3 questions (choice+noul+score)  201 ms   (p10 193 / p90 208)
-6 questions                      366 ms   (p10 357 / p90 383)
-
-4x 3q at once                    138 ms/request   (550 ms wall for four)
-8x 3q at once                    135 ms/request   (1079 ms wall for eight)
+                       direct SGLang     via LiteLLM gateway
+1 question  (noul)           81 ms              91 ms
+3 questions                 158 ms             169 ms
+6 questions                 320 ms             340 ms
 ```
+
+The second column is the same SGLang server reached through a **LiteLLM** gateway
+(`chat_template_kwargs` is honoured on both routes, so thinking is off). The hop
+is worth ~10 ms at one question and ~20 ms at six — real, but not where the time
+goes. These figures replace an earlier 111 / 201 / 366 ms set taken on another
+day; treat single-digit percentages as day-to-day noise and re-measure on your own
+hardware.
 
 The questions of one request are issued concurrently (`JEVB_MAX_CONCURRENCY`,
-default 8), and what is left of that growth belongs to the backend rather than to
-the bridge: the same endpoint called directly answers a lone first-token request
-in 107 ms serially and tops out around 15–21 calls/s under concurrency (3 in
-flight → 199 ms wall, 12 → 563 ms) — so the bridge itself costs about 4 ms.
+default 8), and *N questions at once* is a different quantity from *N questions in
+a row*. Four simultaneous 3-question requests against the same warm endpoint:
+
+```
+                       wall     per-request p50   slowest    wall/N
+direct SGLang          498 ms        370 ms         491 ms     124 ms
+via LiteLLM            526 ms        397 ms         520 ms     132 ms
+```
+
+What a caller feels is the **per-request p50 (~370–400 ms)**, not the 124–132 ms:
+wall/N is throughput written as if it were a latency. (An earlier revision of this
+README published exactly that amortised figure as "median ms/request", which
+understated user-visible latency by roughly 3×; `examples/bench.py` now prints
+wall, p50, slowest and wall/N separately.) 24 backend calls in ~990 ms is ~24
+calls/s, while the bridge's own share of a ~85 ms single-question budget stays
+around 4 ms. If your gateway puts a `rpm` or `max_parallel_requests` cap on the
+model group, that cap — not this number — is your ceiling; check it before
+planning capacity around 24 calls/s.
 
 Reproduce with `python examples/bench.py http://127.0.0.1:8900 20`. For
 comparison, TypeSafe reports 70–500 ms for hosted Jev and a community

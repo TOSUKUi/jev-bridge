@@ -58,7 +58,18 @@ def score_answer(probs: Sequence[float]) -> float:
 
 
 def probabilities_map(labels: Sequence[str], probs: Sequence[float]) -> Dict[str, float]:
-    return {label: round(p, 4) for label, p in zip(labels, probs)}
+    """Label -> probability, rounded to 4 decimals with the residual absorbed.
+
+    Rounding each entry on its own makes a three-way coin flip report 0.3333 x 3
+    = 0.9999, which breaks the sum-to-1 contract Jev clients rely on. The
+    largest entry absorbs the rounding error (it moves by at most a few units in
+    the last decimal), so the map sums to 1.0 exactly.
+    """
+    out = {label: round(p, 4) for label, p in zip(labels, probs)}
+    if out:
+        key = max(out, key=lambda k: out[k])
+        out[key] = round(out[key] + (1.0 - sum(out.values())), 4)
+    return out
 
 
 def legend_map(labels: Sequence[str], descriptions: Sequence[str]) -> Dict[str, str]:

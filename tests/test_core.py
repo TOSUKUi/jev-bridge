@@ -54,6 +54,11 @@ def test_score_answer_between_rungs():
 def test_probabilities_map_rounding():
     m = probabilities_map(["A", "B"], [0.98765, 0.01235])
     assert m == {"A": 0.9877, "B": 0.0123}
+    # a three-way coin flip must not report 0.9999: the residual goes to the
+    # largest entry so the contract (probabilities sum to 1) holds exactly
+    three = probabilities_map(["A", "B", "C"], [1 / 3, 1 / 3, 1 / 3])
+    assert three == {"A": 0.3334, "B": 0.3333, "C": 0.3333}
+    assert abs(sum(three.values()) - 1.0) < 1e-9
 
 
 # ---------- labels ----------
