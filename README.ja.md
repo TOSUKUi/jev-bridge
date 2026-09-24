@@ -38,7 +38,8 @@ instruct モデルで分類をするとき、普通は「JSON で答えてくだ
 ## クイックスタート
 
 ```bash
-pip install jev-bridge            # チェックアウトからなら: pip install -e ".[dev]"
+pip install git+https://github.com/TOSUKUi/jev-bridge.git   # PyPI にはありません
+# (チェックアウトからなら: pip install -e ".[dev]")
 
 export JEVB_BACKEND_BASE_URL="http://127.0.0.1:30010/v1"   # 任意の OpenAI 互換サーバ
 export JEVB_BACKEND_MODEL="qwen3.8-flash-next"

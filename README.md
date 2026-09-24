@@ -39,7 +39,8 @@ No fine-tuning, no calibration training, no output-token decoding.
 ## Quick start
 
 ```bash
-pip install jev-bridge            # or: pip install -e ".[dev]" from a checkout
+pip install git+https://github.com/TOSUKUi/jev-bridge.git   # not on PyPI
+# (from a checkout instead: pip install -e ".[dev]")
 
 export JEVB_BACKEND_BASE_URL="http://127.0.0.1:30010/v1"   # any OpenAI-compatible server
 export JEVB_BACKEND_MODEL="qwen3.8-flash-next"
