@@ -230,3 +230,70 @@ def test_http_error_raises_backend_error():
 
     err = asyncio.run(run())
     assert err.status == 502
+
+
+# --- temperature / logit_bias: the only two sampling parameters that reach a score --
+
+def _probing_client(**kwargs) -> "OpenAICompatClient":
+    seen: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=_ok_response())
+
+    client = OpenAICompatClient("http://example.invalid/v1", model="m", **kwargs)
+    client._client = httpx.AsyncClient(  # type: ignore[assignment]
+        base_url="http://example.invalid/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    return client, seen  # type: ignore[return-value]
+
+
+def _score(client):
+    async def run():
+        out = await client.first_token_logprobs(MESSAGES, 20)
+        await client.aclose()
+        return out
+
+    return asyncio.run(run())
+
+
+def test_temperature_defaults_to_greedy_and_no_logit_bias():
+    client, seen = _probing_client()
+    _score(client)
+    assert seen[0]["temperature"] == 0.0
+    assert "logit_bias" not in seen[0]
+
+
+def test_temperature_is_forwarded():
+    client, seen = _probing_client(temperature=1.3)
+    _score(client)
+    assert seen[0]["temperature"] == 1.3
+
+
+def test_logit_bias_is_forwarded_verbatim():
+    client, seen = _probing_client(logit_bias={"A": -0.5, " B": 2.0})
+    _score(client)
+    assert seen[0]["logit_bias"] == {"A": -0.5, " B": 2.0}
+
+
+def test_extra_body_still_overrides_the_first_class_temperature():
+    """extra_body is the escape hatch of last resort, so it wins — and that is the
+    documented footgun, not an accident."""
+    client, seen = _probing_client(temperature=1.3, extra_body={"temperature": 0.0})
+    _score(client)
+    assert seen[0]["temperature"] == 0.0
+
+
+@pytest.mark.parametrize("bad", [-0.1, float("nan"), float("inf"), "hot", None])
+def test_bad_temperature_rejected(bad):
+    with pytest.raises(ValueError):
+        OpenAICompatClient("http://x.invalid/v1", temperature=bad)
+
+
+@pytest.mark.parametrize("bad", [{"A": 200.0}, {"A": "high"}, ["A"], {"": 1.0}, 5])
+def test_bad_logit_bias_rejected(bad):
+    with pytest.raises(ValueError):
+        OpenAICompatClient("http://x.invalid/v1", logit_bias=bad)

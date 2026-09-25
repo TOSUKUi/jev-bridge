@@ -135,6 +135,8 @@ curl -s http://127.0.0.1:8900/v1/systemone -H 'Content-Type: application/json' -
 | `JEVB_BACKEND_TIMEOUT` | `60` | 1呼び出しあたりのタイムアウト秒 |
 | `JEVB_MAX_CONCURRENCY` | `8` | リクエスト内の並列質問数 |
 | `JEVB_TOP_K` | `20` | 要求する `top_logprobs` の最小値（選択肢数をカバーするよう自動で引き上げ） |
+| `JEVB_TEMPERATURE` | `0.0` | バックエンドに送る `temperature`。報告される確率を伸縮させる（下記） |
+| `JEVB_LOGIT_BIAS` | — | `{"<token>": <bias>}` の形で logit 自体への加算バイアス。例 `{"A": -0.5}` |
 | `JEVB_CONFIDENCE_METHOD` | `linear` | `linear` \| `max_prob` \| `entropy` |
 | `JEVB_PREFILL_ASSISTANT` | `1` | `<think></think>` プレフィルを assistant メッセージに付与 |
 | `JEVB_DISABLE_THINKING` | `1` | `chat_template_kwargs: {enable_thinking: false, preserve_thinking: false}` を送る。バックエンドに拒否されたら自動で外して再試行 |
@@ -150,6 +152,19 @@ Jev の公開サンプルで観測できる confidence 値（例: `{0.0, 0.7, 0.
 
 **ここでの confidence は分布形状の統計量であり、Jev の RLCD 較正済み confidence ではありません。**
 閾値はドリフトし得るものとして扱い、自分のタスクで検証してください。
+
+### `JEVB_TEMPERATURE` / `JEVB_LOGIT_BIAS`
+
+`temperature` は返り logprob を計算する**前に**適用されるので、報告される確率が全部
+伸縮します。`0.5` では p² 正規化と3桁一致（0.053/0.503/0.444 → 0.006/0.559/0.435）、
+`2.0` では 0.996/0.003/0.001 が 0.921/0.052/0.027 になります。`logit_bias` は logit に
+直接足します。どちらも `/health` に出します。
+
+既定の `0.0` と空は、JevBench 公版で一番スコアが出る設定です。`0.0` は hard が毎リプレイ
+88/111 で、`1.3` にすると 86〜87/111 に落ちて ECE も良くならない（0.065〜0.087 →
+0.075〜0.093）ので、フラット化による校正上の利得もありません。バイアス項に訂正対象が
+あるわけでもない（hard で選択肢位置の分布が 17.9/28.4/25.4/23.9/4.5 %、gold が
+22.4/22.4/31.3/17.9/6.0 %）。
 
 ## プロンプトキャッシュ
 

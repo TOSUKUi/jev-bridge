@@ -133,6 +133,8 @@ Question types (matching Jev's primitives):
 | `JEVB_BACKEND_TIMEOUT` | `60` | per-call timeout (seconds) |
 | `JEVB_MAX_CONCURRENCY` | `8` | in-flight question calls per request |
 | `JEVB_TOP_K` | `20` | minimum `top_logprobs` requested (raised to cover all options) |
+| `JEVB_TEMPERATURE` | `0.0` | `temperature` sent to the backend; rescales every reported probability (see below) |
+| `JEVB_LOGIT_BIAS` | — | `{"<token>": <bias>}`, additive bias on the logits themselves, e.g. `{"A": -0.5}` |
 | `JEVB_CONFIDENCE_METHOD` | `linear` | `linear` \| `max_prob` \| `entropy` |
 | `JEVB_PREFILL_ASSISTANT` | `1` | append `<think></think>` to suppress thinking-model preamble |
 | `JEVB_DISABLE_THINKING` | `1` | send `chat_template_kwargs: {enable_thinking: false, preserve_thinking: false}`; auto-retries without it if the backend rejects it |
@@ -151,6 +153,20 @@ confidence values observable in Jev's published examples (e.g. `{0.0, 0.7,
 
 **Confidence here is a distribution-shape statistic, not Jev's RLCD-calibrated
 confidence.** Treat thresholds as drift-prone and validate them on your task.
+
+### `JEVB_TEMPERATURE` / `JEVB_LOGIT_BIAS`
+
+`temperature` is applied by the backend **before** it computes the returned
+logprobs, so it rescales every reported probability: at `0.5` the payload matches
+the p² renormalisation to three decimals (0.053/0.503/0.444 → 0.006/0.559/0.435),
+and `2.0` turns 0.996/0.003/0.001 into 0.921/0.052/0.027. `logit_bias` is added to
+the logits. Both are echoed by `/health`.
+
+The defaults (`0.0`, no bias) are the best measured configuration on the JevBench
+public tiers: hard accuracy is 88/111 on every rep at `0.0`, and `1.3` drops to
+86–87/111 without buying calibration (ECE 0.065–0.087 → 0.075–0.093). A bias term
+has nothing to correct either — the option positions the model picks track the gold
+positions (17.9/28.4/25.4/23.9/4.5 % vs 22.4/22.4/31.3/17.9/6.0 % on hard).
 
 ## Prompt caching
 

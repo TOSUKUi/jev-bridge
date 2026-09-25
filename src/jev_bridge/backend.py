@@ -15,6 +15,11 @@ sampled token is scored). ``max_tokens`` is sent by default; backends that
 renamed the field (OpenAI's GPT-5.x family) are handled by naming
 ``max_completion_tokens`` in ``extra_body``, or by latching after the first
 rejection that asks for it.
+
+Scoring parameters: ``temperature`` and ``logit_bias`` are first-class arguments
+because they are applied before the backend computes the returned logprobs, so
+they move the reported probabilities. Measured: ``temperature=0.5`` reproduces the
+p**2 renormalisation of the label distribution to three decimals.
 """
 
 from __future__ import annotations
@@ -28,6 +33,37 @@ import httpx
 from .schemas import JevBridgeError
 
 
+def check_temperature(value: Any) -> float:
+    """Validate the scoring temperature (a non-negative finite number)."""
+    try:
+        t = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"temperature must be a number, got {value!r}")
+    if t != t or t in (float("inf"), float("-inf")) or t < 0:
+        raise ValueError(f"temperature must be a finite number >= 0, got {t}")
+    return t
+
+
+def check_logit_bias(value: Any) -> Dict[str, float]:
+    """Validate a logit bias map: token -> additive logit bias."""
+    if not value:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("logit_bias must be a JSON object of token -> bias")
+    out: Dict[str, float] = {}
+    for token, bias in value.items():
+        if not isinstance(token, str) or not token:
+            raise ValueError("logit_bias keys must be non-empty token strings")
+        try:
+            b = float(bias)
+        except (TypeError, ValueError):
+            raise ValueError(f"logit_bias[{token!r}] must be a number, got {bias!r}")
+        if not -128.0 <= b <= 128.0:
+            raise ValueError(f"logit_bias[{token!r}] must be within [-128, 128], got {b}")
+        out[token] = b
+    return out
+
+
 class OpenAICompatClient:
     def __init__(
         self,
@@ -39,11 +75,17 @@ class OpenAICompatClient:
         max_concurrency: int = 16,
         extra_body: Optional[Dict[str, Any]] = None,
         disable_thinking: bool = True,
+        temperature: float = 0.0,
+        logit_bias: Optional[Dict[str, float]] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.extra_body = dict(extra_body or {})
+        # Both are applied before the backend computes the returned logprobs, so
+        # unlike the rest of the sampling surface they change the reported score.
+        self.temperature = check_temperature(temperature)
+        self.logit_bias = check_logit_bias(logit_bias)
         self._disable_thinking = disable_thinking and "chat_template_kwargs" not in self.extra_body
         self._thinking_kwargs: Dict[str, Any] = {
             "enable_thinking": False,
@@ -96,11 +138,13 @@ class OpenAICompatClient:
         body: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0.0,
+            "temperature": self.temperature,
             self._budget_key(): max_completion_tokens,
             "logprobs": True,
             "top_logprobs": max(1, top_logprobs),
         }
+        if self.logit_bias:
+            body["logit_bias"] = dict(self.logit_bias)
         if stop_tokens:
             body["stop"] = stop_tokens
         body.update(self.extra_body)

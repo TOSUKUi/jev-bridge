@@ -15,6 +15,12 @@ JEVB_BACKEND_EXTRA_BODY       JSON merged into every chat-completions body
 JEVB_DISABLE_THINKING         1/0 — send chat_template_kwargs enable_thinking=false
                               (auto-retry without it if the backend rejects it)
 JEVB_TOP_K                    minimum top_logprobs to request (default 20)
+JEVB_TEMPERATURE              scoring temperature sent to the backend (default
+                              0.0 = the model's raw distribution; the backend
+                              applies it BEFORE returning logprobs, so this
+                              really does move probabilities and confidence)
+JEVB_LOGIT_BIAS               JSON object of token -> additive logit bias,
+                              e.g. '{"A": -0.5}' (default empty = no bias)
 JEVB_CONFIDENCE_METHOD        linear | max_prob | entropy (default linear)
 JEVB_PREFILL_ASSISTANT        1/0 — append "<think></think>" prefill
 JEVB_MODEL_NAME               value reported in answers' "model" (default
@@ -36,7 +42,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from . import __version__
-from .backend import OpenAICompatClient
+from .backend import OpenAICompatClient, check_temperature
 from .schemas import JevBridgeError, SystemOneRequest
 from .scorer import QuestionScorer, score_all
 
@@ -60,10 +66,33 @@ def _parse_extra_body(raw: str) -> Dict[str, Any]:
         return {}
 
 
+def _parse_logit_bias(raw: str) -> Dict[str, float]:
+    """``JEVB_LOGIT_BIAS`` — a JSON object of token -> bias.
+
+    Unlike ``JEVB_BACKEND_EXTRA_BODY`` (silently ignored when malformed) this one
+    affects the score, so a malformed value is a startup error rather than a
+    silently different distribution.
+    """
+    if not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"JEVB_LOGIT_BIAS must be a JSON object of token -> bias: {e}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("JEVB_LOGIT_BIAS must be a JSON object, e.g. '{\"A\": -0.5}'")
+    try:
+        return {str(k): float(v) for k, v in parsed.items()}
+    except (TypeError, ValueError) as e:
+        raise RuntimeError(f"JEVB_LOGIT_BIAS values must be numbers: {e}")
+
+
 def build_state() -> Dict[str, Any]:
     base = os.environ.get("JEVB_BACKEND_BASE_URL")
     if not base:
         raise RuntimeError("JEVB_BACKEND_BASE_URL is required (e.g. http://host:8000/v1)")
+    temperature = check_temperature(os.environ.get("JEVB_TEMPERATURE", "0.0"))
+    logit_bias = _parse_logit_bias(os.environ.get("JEVB_LOGIT_BIAS", ""))
     client = OpenAICompatClient(
         base_url=base,
         api_key=os.environ.get("JEVB_BACKEND_API_KEY", "dummy"),
@@ -72,6 +101,8 @@ def build_state() -> Dict[str, Any]:
         max_concurrency=int(os.environ.get("JEVB_MAX_CONCURRENCY", "8")),
         extra_body=_parse_extra_body(os.environ.get("JEVB_BACKEND_EXTRA_BODY", "")),
         disable_thinking=_bool_env("JEVB_DISABLE_THINKING", True),
+        temperature=temperature,
+        logit_bias=logit_bias,
     )
     scorer = QuestionScorer(
         client,
@@ -80,6 +111,22 @@ def build_state() -> Dict[str, Any]:
         confidence_method=os.environ.get("JEVB_CONFIDENCE_METHOD", "linear"),
     )
     return {"client": client, "scorer": scorer}
+
+
+def app_temperature() -> Any:
+    """Reported by /health. Never raises: /health must stay readable even if the
+    deployment set a bad value (startup would have refused to boot anyway)."""
+    try:
+        return check_temperature(os.environ.get("JEVB_TEMPERATURE", "0.0"))
+    except ValueError as e:
+        return f"invalid ({e})"
+
+
+def app_logit_bias() -> Any:
+    try:
+        return _parse_logit_bias(os.environ.get("JEVB_LOGIT_BIAS", ""))
+    except (RuntimeError, ValueError) as e:
+        return f"invalid ({e})"
 
 
 @asynccontextmanager
@@ -110,6 +157,10 @@ async def health() -> Dict[str, Any]:
         "prefill_assistant": _bool_env("JEVB_PREFILL_ASSISTANT", True),
         "disable_thinking": _bool_env("JEVB_DISABLE_THINKING", True),
         "confidence_method": os.environ.get("JEVB_CONFIDENCE_METHOD", "linear"),
+        # The two knobs that move a score — surfaced here so a deployment can see
+        # at a glance whether it is running on the raw distribution or not.
+        "temperature": app_temperature(),
+        "logit_bias": app_logit_bias(),
     }
 
 

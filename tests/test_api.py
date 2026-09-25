@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from typing import Any, Dict, List, Tuple
 
+import pytest
 from fastapi.testclient import TestClient
 
 import jev_bridge.app as app_module
 from jev_bridge.scorer import QuestionScorer
+
+# Captured before the tests below replace the attribute: the real, env-driven wiring.
+REAL_BUILD_STATE = app_module.build_state
 
 # A plausible first-token distribution covering letters, booleans and digits.
 FAKE_TOP: List[Tuple[str, float]] = [
@@ -214,3 +219,58 @@ def test_health():
         resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+
+
+# --- JEVB_TEMPERATURE / JEVB_LOGIT_BIAS wiring ------------------------------------
+# These two are the only sampling parameters that move a score (measured), so they
+# get first-class env vars, validation, and a /health readout.
+
+def test_env_temperature_and_logit_bias_reach_the_backend_client(monkeypatch):
+    monkeypatch.setenv("JEVB_BACKEND_BASE_URL", "http://example.invalid/v1")
+    monkeypatch.setenv("JEVB_BACKEND_MODEL", "m")
+    monkeypatch.setenv("JEVB_TEMPERATURE", "1.3")
+    monkeypatch.setenv("JEVB_LOGIT_BIAS", '{"A": -0.5, " B": 2}')
+    state = REAL_BUILD_STATE()
+    try:
+        assert state["client"].temperature == 1.3
+        assert state["client"].logit_bias == {"A": -0.5, " B": 2.0}
+    finally:
+        asyncio.run(state["client"].aclose())
+
+
+def test_scoring_defaults_are_the_measured_best(monkeypatch):
+    """No env set = greedy raw distribution, no bias. This is the shipped default
+    because it is the highest-scoring configuration measured so far."""
+    monkeypatch.setenv("JEVB_BACKEND_BASE_URL", "http://example.invalid/v1")
+    monkeypatch.delenv("JEVB_TEMPERATURE", raising=False)
+    monkeypatch.delenv("JEVB_LOGIT_BIAS", raising=False)
+    state = REAL_BUILD_STATE()
+    try:
+        assert state["client"].temperature == 0.0
+        assert state["client"].logit_bias == {}
+    finally:
+        asyncio.run(state["client"].aclose())
+
+
+# (an empty JEVB_LOGIT_BIAS means "no bias" — covered by the defaults test)
+@pytest.mark.parametrize("bad", ["not json", "[1]", '{"A": "high"}', '"A"'])
+def test_malformed_logit_bias_refuses_to_start(monkeypatch, bad):
+    """A silent no-op would mean running on a different distribution than asked for."""
+    monkeypatch.setenv("JEVB_BACKEND_BASE_URL", "http://example.invalid/v1")
+    monkeypatch.setenv("JEVB_LOGIT_BIAS", bad)
+    with pytest.raises(RuntimeError):
+        REAL_BUILD_STATE()
+
+
+def test_health_reports_the_scoring_knobs(monkeypatch):
+    monkeypatch.setenv("JEVB_TEMPERATURE", "1.3")
+    monkeypatch.setenv("JEVB_LOGIT_BIAS", '{"A": -0.5}')
+    client, _ = _client_with_fake_backend()
+    body = client.get("/health").json()
+    assert body["temperature"] == 1.3
+    assert body["logit_bias"] == {"A": -0.5}
+    monkeypatch.delenv("JEVB_TEMPERATURE")
+    monkeypatch.delenv("JEVB_LOGIT_BIAS")
+    body = client.get("/health").json()
+    assert body["temperature"] == 0.0
+    assert body["logit_bias"] == {}
